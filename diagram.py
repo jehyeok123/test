@@ -230,6 +230,8 @@ class DiagramApp:
                 self._resize_data["x"] = event.x
                 self._resize_data["y"] = event.y
                 self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+                self.canvas.bind("<B1-Motion>", self._on_resize_motion)
+                self.canvas.bind("<ButtonRelease-1>", self._on_resize_release)
             return
         resize_mode = self._hit_test_edge(node, event.x, event.y)
         if resize_mode:
@@ -338,6 +340,13 @@ class DiagramApp:
             node.height = max(min_height, orig_height + dy)
         self._redraw_node(node)
         self._update_connections()
+
+    def _on_resize_release(self, _event):
+        self._resize_data["node"] = None
+        self._resize_data["mode"] = None
+        self._resize_data["orig"] = None
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
 
     def _redraw_node(self, node: Node):
         for item in node.items:

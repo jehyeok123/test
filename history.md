@@ -12,3 +12,4 @@ Allow block sizing overrides and wire labels from connections.txt.
 Hide port dots and allow one-sided connections with fixed-length stubs.
 Add edge drag resizing for blocks and remove width/height config.
 Require double-click resize mode to edit block size and disable moves while active.
+Ensure edge resize continues until mouse release even when leaving the edge.
