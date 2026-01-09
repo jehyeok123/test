@@ -1,4 +1,5 @@
 import configparser
+import importlib.util
 import json
 import re
 import sys
@@ -34,6 +35,12 @@ class Connection:
     src: tuple[str, str]
     dst: tuple[str, str]
     line_id: int | None = None
+    manual_mid_x: float | None = None
+
+
+PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
+if PIL_AVAILABLE:
+    from PIL import Image, ImageTk
 
 
 class DiagramApp:
@@ -51,6 +58,7 @@ class DiagramApp:
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
+        self._drag_wire = {"connection": None, "offset": 0.0}
         self._images: list[tk.PhotoImage] = []
         self._build_ui()
 
@@ -62,6 +70,9 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
+        self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
+        self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
+        self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
         self.root.bind("s", lambda _event: self.save_diagram(self.output_path))
         self.root.after(300, lambda: self.save_diagram(self.output_path))
 
@@ -71,10 +82,12 @@ class DiagramApp:
         if node.symbol and node.symbol.get("image"):
             image_path = Path(node.symbol["image"])
             if image_path.exists():
-                image = tk.PhotoImage(file=image_path)
-                self._images.append(image)
-                image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
-                node.items.append(image_id)
+                image_id = self._load_symbol_image(image_path, x1, y1)
+                if image_id:
+                    node.items.append(image_id)
+                else:
+                    rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
+                    node.items.append(rect)
             else:
                 rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
                 node.items.append(rect)
@@ -127,7 +140,7 @@ class DiagramApp:
             return
         x1, y1 = self._port_center(src_port_id)
         x2, y2 = self._port_center(dst_port_id)
-        coords = self._connection_coords((x1, y1), (x2, y2))
+        coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
         line = self.canvas.create_line(
             *coords,
             smooth=False,
@@ -135,6 +148,7 @@ class DiagramApp:
             width=2,
             fill="#333333",
         )
+        self.canvas.addtag_withtag("wire", line)
         connection.line_id = line
 
     def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str) -> int | None:
@@ -178,6 +192,8 @@ class DiagramApp:
         self.canvas.move(f"node:{node.name}", dx, dy)
         node.x += dx
         node.y += dy
+        for connection in self.connections:
+            connection.manual_mid_x = None
         self._update_connections()
 
     def _update_connections(self):
@@ -190,7 +206,7 @@ class DiagramApp:
                 continue
             x1, y1 = self._port_center(src_id)
             x2, y2 = self._port_center(dst_id)
-            coords = self._connection_coords((x1, y1), (x2, y2))
+            coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
             self.canvas.coords(
                 connection.line_id,
                 *coords,
@@ -200,13 +216,80 @@ class DiagramApp:
         self,
         start: tuple[float, float],
         end: tuple[float, float],
+        manual_mid_x: float | None = None,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
         if x1 == x2 or y1 == y2:
             return [x1, y1, x2, y2]
-        mid_x = (x1 + x2) / 2
+        mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+
+    def _load_symbol_image(self, image_path: Path, x1: int, y1: int) -> int | None:
+        if PIL_AVAILABLE:
+            try:
+                image = Image.open(image_path)
+                photo = ImageTk.PhotoImage(image)
+            except Exception as exc:
+                print(f"게이트 이미지 로드 실패: {image_path} ({exc})")
+                return None
+        else:
+            try:
+                photo = tk.PhotoImage(file=image_path)
+            except tk.TclError as exc:
+                print(f"게이트 이미지 로드 실패: {image_path} ({exc})")
+                return None
+        self._images.append(photo)
+        return self.canvas.create_image(x1, y1, image=photo, anchor="nw")
+
+    def _on_wire_press(self, event):
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        line_id = item[0]
+        connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+        if not connection:
+            return
+        coords = self.canvas.coords(line_id)
+        if len(coords) != 8:
+            return
+        mid_x = coords[2]
+        y1 = coords[3]
+        y2 = coords[5]
+        if not self._near_vertical_segment(event.x, event.y, mid_x, y1, y2):
+            return
+        self._drag_wire["connection"] = connection
+        self._drag_wire["offset"] = event.x - mid_x
+
+    def _on_wire_motion(self, event):
+        connection: Connection | None = self._drag_wire["connection"]
+        if not connection:
+            return
+        connection.manual_mid_x = event.x - self._drag_wire["offset"]
+        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+        if not src_id or not dst_id:
+            return
+        x1, y1 = self._port_center(src_id)
+        x2, y2 = self._port_center(dst_id)
+        coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+        self.canvas.coords(connection.line_id, *coords)
+
+    def _on_wire_release(self, _event):
+        self._drag_wire["connection"] = None
+
+    def _near_vertical_segment(
+        self,
+        px: float,
+        py: float,
+        x: float,
+        y1: float,
+        y2: float,
+        threshold: float = 6.0,
+    ) -> bool:
+        if abs(px - x) > threshold:
+            return False
+        return min(y1, y2) - threshold <= py <= max(y1, y2) + threshold
 
     def save_diagram(self, path: Path):
         self.root.update()
@@ -344,7 +427,7 @@ def main():
         print("input.txt 또는 connections.txt 파일이 없습니다.")
         sys.exit(1)
     nodes = parse_blocks(blocks_path)
-    symbols = load_gate_symbols(Path("gate_symbol.txt"))
+    symbols = load_gate_symbols(Path("gate_symbol.json"))
     connections = parse_connections(connections_path, nodes, symbols)
     validate_connections(nodes, connections, Path("error.log"))
     app = DiagramApp(nodes, connections, output_path)
