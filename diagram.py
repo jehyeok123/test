@@ -27,6 +27,7 @@ class Node:
     height: int = 100
     base_height: int = 100
     items: list[int] = field(default_factory=list)
+    resize_enabled: bool = False
 
 
 @dataclass
@@ -66,6 +67,7 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
+        self.canvas.tag_bind("node", "<Double-Button-1>", self._on_toggle_resize)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
@@ -114,7 +116,16 @@ class DiagramApp:
             )
             node.items.extend([rect, arc, left, top, bottom, outline_arc])
         else:
-            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#e0e0e0", outline="#666666", width=2)
+            outline_width = 4 if node.resize_enabled else 2
+            rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                fill="#e0e0e0",
+                outline="#666666",
+                width=outline_width,
+            )
             node.items.append(rect)
         if node.kind == "BLOCK":
             label = self.canvas.create_text(
@@ -211,6 +222,15 @@ class DiagramApp:
             return
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
+        if node.resize_enabled:
+            resize_mode = self._hit_test_edge(node, event.x, event.y)
+            if resize_mode:
+                self._resize_data["node"] = node
+                self._resize_data["mode"] = resize_mode
+                self._resize_data["x"] = event.x
+                self._resize_data["y"] = event.y
+                self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+            return
         resize_mode = self._hit_test_edge(node, event.x, event.y)
         if resize_mode:
             self._resize_data["node"] = node
@@ -251,7 +271,7 @@ class DiagramApp:
         self._update_connections()
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
-        if node.kind != "BLOCK":
+        if node.kind != "BLOCK" or not node.resize_enabled:
             return None
         left = node.x
         right = node.x + node.width
@@ -266,6 +286,22 @@ class DiagramApp:
         if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
             return "right"
         return None
+
+    def _on_toggle_resize(self, event):
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        tags = self.canvas.gettags(item[0])
+        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
+        if not node_tag:
+            return
+        node_name = node_tag.split(":", 1)[1]
+        node = self.nodes[node_name]
+        if node.kind != "BLOCK":
+            return
+        node.resize_enabled = not node.resize_enabled
+        self._redraw_node(node)
+        self._update_connections()
 
     def _on_resize_motion(self, event):
         node = self._resize_data["node"]
@@ -406,6 +442,8 @@ class DiagramApp:
                 if not port_info:
                     return
                 node, port = port_info
+                if node.resize_enabled:
+                    return
                 self._drag_wire["connection"] = connection
                 self._drag_wire["mode"] = "dst_port"
                 self._drag_wire["node"] = node
@@ -416,6 +454,8 @@ class DiagramApp:
                 if not port_info:
                     return
                 node, port = port_info
+                if node.resize_enabled:
+                    return
                 self._drag_wire["connection"] = connection
                 self._drag_wire["mode"] = "src_port"
                 self._drag_wire["node"] = node
@@ -437,6 +477,8 @@ class DiagramApp:
             if not port_info:
                 return
             node, port = port_info
+            if node.resize_enabled:
+                return
             self._reset_mid_for_port(node.name, port.name)
             self._drag_wire["connection"] = connection
             self._drag_wire["mode"] = "src_port"
@@ -450,6 +492,8 @@ class DiagramApp:
             if not port_info:
                 return
             node, port = port_info
+            if node.resize_enabled:
+                return
             self._reset_mid_for_port(node.name, port.name)
             self._drag_wire["connection"] = connection
             self._drag_wire["mode"] = "dst_port"
