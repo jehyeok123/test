@@ -31,8 +31,8 @@ class Node:
 
 @dataclass
 class Connection:
-    src: tuple[str, str]
-    dst: tuple[str, str]
+    src: tuple[str, str] | None
+    dst: tuple[str, str] | None
     line_id: int | None = None
     manual_mid_x: float | None = None
     label: str | None = None
@@ -139,7 +139,7 @@ class DiagramApp:
                     px, py = x1, y1 + 50 + idx * input_step
                 if port.manual_y is not None:
                     py = port.manual_y
-                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="black", outline="black")
+                port_id = self.canvas.create_oval(px, py, px, py, fill="", outline="", width=0)
                 port.canvas_id = port_id
                 node.items.append(port_id)
 
@@ -154,7 +154,7 @@ class DiagramApp:
                     px, py = x2, y1 + 50 + idx * output_step
                 if port.manual_y is not None:
                     py = port.manual_y
-                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="black", outline="black")
+                port_id = self.canvas.create_oval(px, py, px, py, fill="", outline="", width=0)
                 port.canvas_id = port_id
                 node.items.append(port_id)
 
@@ -163,19 +163,9 @@ class DiagramApp:
             self.canvas.addtag_withtag(f"node:{node.name}", item)
 
     def _draw_connection(self, connection: Connection):
-        src_node, src_port = connection.src
-        dst_node, dst_port = connection.dst
-        src_port_id = self._get_port_canvas_id(src_node, src_port, "out")
-        dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
-        if not src_port_id or not dst_port_id:
+        coords = self._connection_line_coords(connection)
+        if not coords:
             return
-        x1, y1 = self._port_center(src_port_id)
-        x2, y2 = self._port_center(dst_port_id)
-        coords = self._connection_coords(
-            (x1, y1),
-            (x2, y2),
-            connection.manual_mid_x,
-        )
         line = self.canvas.create_line(
             *coords,
             smooth=False,
@@ -248,17 +238,9 @@ class DiagramApp:
         for connection in self.connections:
             if not connection.line_id:
                 continue
-            src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
-            dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
-            if not src_id or not dst_id:
+            coords = self._connection_line_coords(connection)
+            if not coords:
                 continue
-            x1, y1 = self._port_center(src_id)
-            x2, y2 = self._port_center(dst_id)
-            coords = self._connection_coords(
-                (x1, y1),
-                (x2, y2),
-                connection.manual_mid_x,
-            )
             self.canvas.coords(
                 connection.line_id,
                 *coords,
@@ -277,6 +259,33 @@ class DiagramApp:
             return [x1, y1, x2, y2]
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+
+    def _connection_line_coords(self, connection: Connection) -> list[float] | None:
+        if connection.src and connection.dst:
+            src_node, src_port = connection.src
+            dst_node, dst_port = connection.dst
+            src_port_id = self._get_port_canvas_id(src_node, src_port, "out")
+            dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
+            if not src_port_id or not dst_port_id:
+                return None
+            x1, y1 = self._port_center(src_port_id)
+            x2, y2 = self._port_center(dst_port_id)
+            return self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+        if connection.dst:
+            dst_node, dst_port = connection.dst
+            dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
+            if not dst_port_id:
+                return None
+            x2, y2 = self._port_center(dst_port_id)
+            return [x2 - 50, y2, x2, y2]
+        if connection.src:
+            src_node, src_port = connection.src
+            src_port_id = self._get_port_canvas_id(src_node, src_port, "out")
+            if not src_port_id:
+                return None
+            x1, y1 = self._port_center(src_port_id)
+            return [x1, y1, x1 + 50, y1]
+        return None
 
     def _label_position(self, coords: list[float]) -> tuple[float, float]:
         if len(coords) >= 8:
@@ -311,14 +320,32 @@ class DiagramApp:
         connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
         if not connection:
             return
-        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
-        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
-        if not src_id or not dst_id:
+        coords = self._connection_line_coords(connection)
+        if not coords:
             return
-        start = self._port_center(src_id)
-        end = self._port_center(dst_id)
-        coords = self._connection_coords(start, end, connection.manual_mid_x)
         if len(coords) < 8:
+            if not self._near_horizontal_segment(event.x, event.y, coords[0], coords[2], coords[1]):
+                return
+            if connection.dst:
+                port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+                if not port_info:
+                    return
+                node, port = port_info
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "dst_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            if connection.src:
+                port_info = self._find_port(connection.src[0], connection.src[1], "out")
+                if not port_info:
+                    return
+                node, port = port_info
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "src_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
             return
         mid_x = coords[2]
         y1a = coords[3]
@@ -329,6 +356,8 @@ class DiagramApp:
             self._drag_wire["mode"] = "mid"
             return
         if self._near_horizontal_segment(event.x, event.y, coords[0], mid_x, y1a):
+            if not connection.src:
+                return
             port_info = self._find_port(connection.src[0], connection.src[1], "out")
             if not port_info:
                 return
@@ -340,6 +369,8 @@ class DiagramApp:
             self._drag_wire["port"] = port
             return
         if self._near_horizontal_segment(event.x, event.y, mid_x, coords[6], y2a):
+            if not connection.dst:
+                return
             port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
             if not port_info:
                 return
@@ -415,12 +446,11 @@ class DiagramApp:
     def _move_port(self, node: Node, port: Port, kind: str, target_y: float):
         if port.canvas_id is None:
             return
-        radius = 6
         min_y = node.y + 10
         max_y = node.y + node.height - 10
         new_y = max(min_y, min(target_y, max_y))
         x = node.x if kind == "in" else node.x + node.width
-        self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
+        self.canvas.coords(port.canvas_id, x, new_y, x, new_y)
         port.manual_y = new_y
         self._update_connections()
 
@@ -534,6 +564,20 @@ def parse_connections(
             connections.append(Connection(src=(src_node, src_port), dst=(dst_node, dst_port), label=label))
             continue
 
+        dst_only_match = re.match(r"^->\s*(\S+)$", line)
+        if dst_only_match:
+            dst = dst_only_match.group(1)
+            dst_node, dst_port = dst.split(".", 1)
+            connections.append(Connection(src=None, dst=(dst_node, dst_port), label=label))
+            continue
+
+        src_only_match = re.match(r"^(\S+)\s*->$", line)
+        if src_only_match:
+            src = src_only_match.group(1)
+            src_node, src_port = src.split(".", 1)
+            connections.append(Connection(src=(src_node, src_port), dst=None, label=label))
+            continue
+
         raise ValueError(f"연결 형식을 파싱할 수 없습니다: {line}")
     return connections
 
@@ -551,8 +595,10 @@ def validate_connections(nodes: dict[str, Node], connections: list[Connection], 
     used_inputs: set[tuple[str, str]] = set()
     used_outputs: set[tuple[str, str]] = set()
     for connection in connections:
-        used_outputs.add(connection.src)
-        used_inputs.add(connection.dst)
+        if connection.src:
+            used_outputs.add(connection.src)
+        if connection.dst:
+            used_inputs.add(connection.dst)
 
     errors: list[str] = []
     for node in nodes.values():
