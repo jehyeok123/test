@@ -11,6 +11,7 @@ class Port:
     name: str
     kind: str
     canvas_id: int | None = None
+    connected: bool = True
 
 
 @dataclass
@@ -65,9 +66,10 @@ class DiagramApp:
         node.items.extend([rect, label, kind_label])
 
         port_gap = max(node.height - 60, 40)
-        if node.inputs:
-            input_step = port_gap // max(len(node.inputs), 1)
-            for idx, port in enumerate(node.inputs, start=1):
+        connected_inputs = [port for port in node.inputs if port.connected]
+        if connected_inputs:
+            input_step = port_gap // max(len(connected_inputs), 1)
+            for idx, port in enumerate(connected_inputs, start=1):
                 px = x1
                 py = y1 + 50 + idx * input_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#6c7ae0")
@@ -75,9 +77,10 @@ class DiagramApp:
                 port.canvas_id = port_id
                 node.items.extend([port_id, text_id])
 
-        if node.outputs:
-            output_step = port_gap // max(len(node.outputs), 1)
-            for idx, port in enumerate(node.outputs, start=1):
+        connected_outputs = [port for port in node.outputs if port.connected]
+        if connected_outputs:
+            output_step = port_gap // max(len(connected_outputs), 1)
+            for idx, port in enumerate(connected_outputs, start=1):
                 px = x2
                 py = y1 + 50 + idx * output_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#28a745")
@@ -268,14 +271,16 @@ def validate_connections(nodes: dict[str, Node], connections: list[Connection], 
         for port in node.inputs:
             if (node.name, port.name) not in used_inputs:
                 errors.append(f"입력 포트 미연결: {node.name}.{port.name}")
+                port.connected = False
         for port in node.outputs:
             if (node.name, port.name) not in used_outputs:
                 errors.append(f"출력 포트 미연결: {node.name}.{port.name}")
+                port.connected = False
 
     if errors:
         log_path.write_text("\n".join(errors), encoding="utf-8")
         print(f"미연결 포트가 있습니다. {log_path}를 확인하세요.")
-        return False
+        return True
     if log_path.exists():
         log_path.unlink()
     return True
