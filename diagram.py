@@ -1,6 +1,4 @@
 import configparser
-import importlib.util
-import json
 import re
 import sys
 import tkinter as tk
@@ -24,7 +22,6 @@ class Node:
     outputs: list[Port]
     x: int
     y: int
-    symbol: dict | None = None
     width: int = 160
     height: int = 100
     items: list[int] = field(default_factory=list)
@@ -36,11 +33,6 @@ class Connection:
     dst: tuple[str, str]
     line_id: int | None = None
     manual_mid_x: float | None = None
-
-
-PIL_AVAILABLE = importlib.util.find_spec("PIL") is not None
-if PIL_AVAILABLE:
-    from PIL import Image, ImageTk
 
 
 class DiagramApp:
@@ -59,7 +51,6 @@ class DiagramApp:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0}
-        self._images: list[tk.PhotoImage] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -79,18 +70,30 @@ class DiagramApp:
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
-        if node.symbol and node.symbol.get("image"):
-            image_path = Path(node.symbol["image"])
-            if image_path.exists():
-                image_id = self._load_symbol_image(image_path, x1, y1)
-                if image_id:
-                    node.items.append(image_id)
-                else:
-                    rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
-                    node.items.append(rect)
-            else:
-                rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
-                node.items.append(rect)
+        if node.kind == "AND":
+            mid_x = (x1 + x2) / 2
+            rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                mid_x,
+                y2,
+                fill="#f0f5ff",
+                outline="#1f3b74",
+                width=2,
+            )
+            arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.PIESLICE,
+                fill="#f0f5ff",
+                outline="#1f3b74",
+                width=2,
+            )
+            node.items.extend([rect, arc])
         else:
             rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
             node.items.append(rect)
@@ -103,11 +106,7 @@ class DiagramApp:
         if connected_inputs:
             input_step = port_gap // max(len(connected_inputs), 1)
             for idx, port in enumerate(connected_inputs, start=1):
-                if node.symbol:
-                    pos = node.symbol.get("inputs", {}).get(port.name)
-                    px, py = (x1 + pos[0], y1 + pos[1]) if pos else (x1, y1 + 50 + idx * input_step)
-                else:
-                    px, py = x1, y1 + 50 + idx * input_step
+                px, py = x1, y1 + 50 + idx * input_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#6c7ae0")
                 text_id = self.canvas.create_text(px + 12, py, text=port.name, anchor="w", font=("Arial", 9))
                 port.canvas_id = port_id
@@ -117,11 +116,7 @@ class DiagramApp:
         if connected_outputs:
             output_step = port_gap // max(len(connected_outputs), 1)
             for idx, port in enumerate(connected_outputs, start=1):
-                if node.symbol:
-                    pos = node.symbol.get("outputs", {}).get(port.name)
-                    px, py = (x1 + pos[0], y1 + pos[1]) if pos else (x2, y1 + 50 + idx * output_step)
-                else:
-                    px, py = x2, y1 + 50 + idx * output_step
+                px, py = x2, y1 + 50 + idx * output_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#28a745")
                 text_id = self.canvas.create_text(px - 12, py, text=port.name, anchor="e", font=("Arial", 9))
                 port.canvas_id = port_id
@@ -225,22 +220,6 @@ class DiagramApp:
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
 
-    def _load_symbol_image(self, image_path: Path, x1: int, y1: int) -> int | None:
-        if PIL_AVAILABLE:
-            try:
-                image = Image.open(image_path)
-                photo = ImageTk.PhotoImage(image)
-            except Exception as exc:
-                print(f"게이트 이미지 로드 실패: {image_path} ({exc})")
-                return None
-        else:
-            try:
-                photo = tk.PhotoImage(file=image_path)
-            except tk.TclError as exc:
-                print(f"게이트 이미지 로드 실패: {image_path} ({exc})")
-                return None
-        self._images.append(photo)
-        return self.canvas.create_image(x1, y1, image=photo, anchor="nw")
 
     def _on_wire_press(self, event):
         item = self.canvas.find_withtag("current")
@@ -332,17 +311,9 @@ def parse_blocks(path: Path) -> dict[str, Node]:
     return nodes
 
 
-def load_gate_symbols(path: Path) -> dict[str, dict]:
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data if isinstance(data, dict) else {}
-
-
 def parse_connections(
     path: Path,
     nodes: dict[str, Node],
-    symbols: dict[str, dict],
 ) -> list[Connection]:
     connections: list[Connection] = []
     gate_index = 1
@@ -355,19 +326,15 @@ def parse_connections(
             gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
             inputs = [item.strip() for item in inputs_raw.split(",") if item.strip()]
             output = output_raw.strip()
-            symbol = symbols.get(gate_type)
-            width = symbol.get("size", [120, 80])[0] if symbol else 120
-            height = symbol.get("size", [120, 80])[1] if symbol else 80
             gate_node = Node(
                 name=gate_name,
                 kind=gate_type,
                 inputs=[Port(name=f"in{idx+1}", kind="in") for idx in range(len(inputs))],
                 outputs=[Port(name="out", kind="out")],
-                symbol=symbol,
                 x=400 + gate_index * 40,
                 y=120 + gate_index * 40,
-                width=width,
-                height=height,
+                width=120,
+                height=80,
             )
             nodes[gate_name] = gate_node
             gate_index += 1
@@ -427,8 +394,7 @@ def main():
         print("input.txt 또는 connections.txt 파일이 없습니다.")
         sys.exit(1)
     nodes = parse_blocks(blocks_path)
-    symbols = load_gate_symbols(Path("gate_symbol.json"))
-    connections = parse_connections(connections_path, nodes, symbols)
+    connections = parse_connections(connections_path, nodes)
     validate_connections(nodes, connections, Path("error.log"))
     app = DiagramApp(nodes, connections, output_path)
     app.run()
