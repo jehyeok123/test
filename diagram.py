@@ -1,4 +1,5 @@
 import configparser
+import math
 import re
 import sys
 import tkinter as tk
@@ -32,6 +33,7 @@ class Connection:
     src: tuple[str, str]
     dst: tuple[str, str]
     line_id: int | None = None
+    bends: list[tuple[float, float]] = field(default_factory=list)
 
 
 class DiagramApp:
@@ -54,16 +56,43 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
+        self.canvas.tag_bind("wire", "<Double-Button-1>", self._on_wire_double_click)
         self.root.bind("s", lambda _event: self.save_diagram(self.output_path))
         self.root.after(300, lambda: self.save_diagram(self.output_path))
 
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
-        rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
+        if node.kind == "AND":
+            mid = x1 + (x2 - x1) / 2
+            rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                mid,
+                y2,
+                fill="#f0f5ff",
+                outline="#1f3b74",
+                width=2,
+            )
+            arc = self.canvas.create_arc(
+                mid - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.PIESLICE,
+                fill="#f0f5ff",
+                outline="#1f3b74",
+                width=2,
+            )
+            node.items.extend([rect, arc])
+        else:
+            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
+            node.items.append(rect)
         label = self.canvas.create_text((x1 + x2) / 2, y1 + 16, text=node.name, font=("Arial", 12, "bold"))
         kind_label = self.canvas.create_text((x1 + x2) / 2, y1 + 34, text=node.kind, font=("Arial", 9))
-        node.items.extend([rect, label, kind_label])
+        node.items.extend([label, kind_label])
 
         port_gap = max(node.height - 60, 40)
         connected_inputs = [port for port in node.inputs if port.connected]
@@ -101,16 +130,15 @@ class DiagramApp:
             return
         x1, y1 = self._port_center(src_port_id)
         x2, y2 = self._port_center(dst_port_id)
+        coords = self._connection_coords((x1, y1), (x2, y2), connection.bends)
         line = self.canvas.create_line(
-            x1, y1,
-            (x1 + x2) / 2, y1,
-            (x1 + x2) / 2, y2,
-            x2, y2,
-            smooth=True,
+            *coords,
+            smooth=False,
             arrow=tk.LAST,
             width=2,
             fill="#333333",
         )
+        self.canvas.addtag_withtag("wire", line)
         connection.line_id = line
 
     def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str) -> int | None:
@@ -166,13 +194,110 @@ class DiagramApp:
                 continue
             x1, y1 = self._port_center(src_id)
             x2, y2 = self._port_center(dst_id)
+            coords = self._connection_coords((x1, y1), (x2, y2), connection.bends)
             self.canvas.coords(
                 connection.line_id,
-                x1, y1,
-                (x1 + x2) / 2, y1,
-                (x1 + x2) / 2, y2,
-                x2, y2,
+                *coords,
             )
+
+    def _connection_coords(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        bends: list[tuple[float, float]],
+    ) -> list[float]:
+        points = [start, *bends, end]
+        coords: list[float] = []
+        for x, y in points:
+            coords.extend([x, y])
+        return coords
+
+    def _on_wire_double_click(self, event):
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        line_id = item[0]
+        connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+        if not connection:
+            return
+        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+        if not src_id or not dst_id:
+            return
+        start = self._port_center(src_id)
+        end = self._port_center(dst_id)
+        points = [start, *connection.bends, end]
+        insert_index = self._nearest_segment_index(points, (event.x, event.y))
+        bend = self._snap_bend(points[insert_index], (event.x, event.y), points[insert_index + 1])
+        connection.bends.insert(insert_index, bend)
+        coords = self._connection_coords(start, end, connection.bends)
+        self.canvas.coords(connection.line_id, *coords)
+
+    def _nearest_segment_index(
+        self,
+        points: list[tuple[float, float]],
+        target: tuple[float, float],
+    ) -> int:
+        best_index = 0
+        best_dist = float("inf")
+        for idx in range(len(points) - 1):
+            dist = self._point_to_segment_distance(target, points[idx], points[idx + 1])
+            if dist < best_dist:
+                best_dist = dist
+                best_index = idx
+        return best_index
+
+    def _point_to_segment_distance(
+        self,
+        p: tuple[float, float],
+        a: tuple[float, float],
+        b: tuple[float, float],
+    ) -> float:
+        ax, ay = a
+        bx, by = b
+        px, py = p
+        dx = bx - ax
+        dy = by - ay
+        if dx == 0 and dy == 0:
+            return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+        t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        proj_x = ax + t * dx
+        proj_y = ay + t * dy
+        return ((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5
+
+    def _snap_bend(
+        self,
+        prev: tuple[float, float],
+        current: tuple[float, float],
+        nxt: tuple[float, float],
+    ) -> tuple[float, float]:
+        angle = self._angle_between(prev, current, nxt)
+        if 70 <= angle <= 120:
+            cand1 = (prev[0], current[1])
+            cand2 = (current[0], prev[1])
+            angle1 = self._angle_between(prev, cand1, nxt)
+            angle2 = self._angle_between(prev, cand2, nxt)
+            return cand1 if abs(angle1 - 90) <= abs(angle2 - 90) else cand2
+        return current
+
+    def _angle_between(
+        self,
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+    ) -> float:
+        v1x = p1[0] - p2[0]
+        v1y = p1[1] - p2[1]
+        v2x = p3[0] - p2[0]
+        v2y = p3[1] - p2[1]
+        dot = v1x * v2x + v1y * v2y
+        mag1 = (v1x * v1x + v1y * v1y) ** 0.5
+        mag2 = (v2x * v2x + v2y * v2y) ** 0.5
+        if mag1 == 0 or mag2 == 0:
+            return 180.0
+        cos_angle = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+        return (180.0 / 3.141592653589793) * math.acos(cos_angle)
 
     def save_diagram(self, path: Path):
         self.root.update()
