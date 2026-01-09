@@ -102,10 +102,10 @@ class DiagramApp:
         x1, y1 = self._port_center(src_port_id)
         x2, y2 = self._port_center(dst_port_id)
         line = self.canvas.create_line(
-            x1[0], x1[1],
-            (x1[0] + x2[0]) / 2, x1[1],
-            (x1[0] + x2[0]) / 2, x2[1],
-            x2[0], x2[1],
+            x1, y1,
+            (x1 + x2) / 2, y1,
+            (x1 + x2) / 2, y2,
+            x2, y2,
             smooth=True,
             arrow=tk.LAST,
             width=2,
@@ -271,11 +271,11 @@ def validate_connections(nodes: dict[str, Node], connections: list[Connection], 
             continue
         for port in node.inputs:
             if (node.name, port.name) not in used_inputs:
-                errors.append(f"입력 포트 미연결: {node.name}.{port.name}")
+                errors.append(f"[WARN] 입력 포트 미연결: {node.name}.{port.name}")
                 port.connected = False
         for port in node.outputs:
             if (node.name, port.name) not in used_outputs:
-                errors.append(f"출력 포트 미연결: {node.name}.{port.name}")
+                errors.append(f"[WARN] 출력 포트 미연결: {node.name}.{port.name}")
                 port.connected = False
 
     if errors:
