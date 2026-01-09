@@ -33,8 +33,6 @@ class Connection:
     dst: tuple[str, str]
     line_id: int | None = None
     manual_mid_x: float | None = None
-    manual_y1: float | None = None
-    manual_y2: float | None = None
 
 
 class DiagramApp:
@@ -52,7 +50,7 @@ class DiagramApp:
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
-        self._drag_wire = {"connection": None, "offset": 0.0, "mode": None}
+        self._drag_wire = {"connection": None, "offset": 0.0}
         self._build_ui()
 
     def _build_ui(self):
@@ -165,8 +163,6 @@ class DiagramApp:
             (x1, y1),
             (x2, y2),
             connection.manual_mid_x,
-            connection.manual_y1,
-            connection.manual_y2,
         )
         line = self.canvas.create_line(
             *coords,
@@ -221,8 +217,6 @@ class DiagramApp:
         node.y += dy
         for connection in self.connections:
             connection.manual_mid_x = None
-            connection.manual_y1 = None
-            connection.manual_y2 = None
         self._update_connections()
 
     def _update_connections(self):
@@ -235,13 +229,11 @@ class DiagramApp:
                 continue
             x1, y1 = self._port_center(src_id)
             x2, y2 = self._port_center(dst_id)
-        coords = self._connection_coords(
-            (x1, y1),
-            (x2, y2),
-            connection.manual_mid_x,
-            connection.manual_y1,
-            connection.manual_y2,
-        )
+            coords = self._connection_coords(
+                (x1, y1),
+                (x2, y2),
+                connection.manual_mid_x,
+            )
             self.canvas.coords(
                 connection.line_id,
                 *coords,
@@ -252,24 +244,13 @@ class DiagramApp:
         start: tuple[float, float],
         end: tuple[float, float],
         manual_mid_x: float | None = None,
-        manual_y1: float | None = None,
-        manual_y2: float | None = None,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
         if x1 == x2 or y1 == y2:
             return [x1, y1, x2, y2]
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
-        y1a = manual_y1 if manual_y1 is not None else y1
-        y2a = manual_y2 if manual_y2 is not None else y2
-        coords = [x1, y1]
-        if y1a != y1:
-            coords.extend([x1, y1a])
-        coords.extend([mid_x, y1a, mid_x, y2a])
-        if y2a != y2:
-            coords.extend([x2, y2a])
-        coords.extend([x2, y2])
-        return coords
+        return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
 
 
     def _on_wire_press(self, event):
@@ -286,7 +267,7 @@ class DiagramApp:
             return
         start = self._port_center(src_id)
         end = self._port_center(dst_id)
-        coords = self._connection_coords(start, end, connection.manual_mid_x, connection.manual_y1, connection.manual_y2)
+        coords = self._connection_coords(start, end, connection.manual_mid_x)
         if len(coords) < 8:
             return
         mid_x = coords[2]
@@ -295,30 +276,13 @@ class DiagramApp:
         if self._near_vertical_segment(event.x, event.y, mid_x, y1a, y2a):
             self._drag_wire["connection"] = connection
             self._drag_wire["offset"] = event.x - mid_x
-            self._drag_wire["mode"] = "vertical"
-            return
-        if self._near_horizontal_segment(event.x, event.y, start[0], mid_x, y1a):
-            self._drag_wire["connection"] = connection
-            self._drag_wire["offset"] = event.y - y1a
-            self._drag_wire["mode"] = "top"
-            return
-        if self._near_horizontal_segment(event.x, event.y, mid_x, end[0], y2a):
-            self._drag_wire["connection"] = connection
-            self._drag_wire["offset"] = event.y - y2a
-            self._drag_wire["mode"] = "bottom"
             return
 
     def _on_wire_motion(self, event):
         connection: Connection | None = self._drag_wire["connection"]
         if not connection:
             return
-        mode = self._drag_wire["mode"]
-        if mode == "vertical":
-            connection.manual_mid_x = event.x - self._drag_wire["offset"]
-        elif mode == "top":
-            connection.manual_y1 = event.y - self._drag_wire["offset"]
-        elif mode == "bottom":
-            connection.manual_y2 = event.y - self._drag_wire["offset"]
+        connection.manual_mid_x = event.x - self._drag_wire["offset"]
         src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
         dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
         if not src_id or not dst_id:
@@ -329,14 +293,11 @@ class DiagramApp:
             (x1, y1),
             (x2, y2),
             connection.manual_mid_x,
-            connection.manual_y1,
-            connection.manual_y2,
         )
         self.canvas.coords(connection.line_id, *coords)
 
     def _on_wire_release(self, _event):
         self._drag_wire["connection"] = None
-        self._drag_wire["mode"] = None
 
     def _near_vertical_segment(
         self,
@@ -351,18 +312,6 @@ class DiagramApp:
             return False
         return min(y1, y2) - threshold <= py <= max(y1, y2) + threshold
 
-    def _near_horizontal_segment(
-        self,
-        px: float,
-        py: float,
-        x1: float,
-        x2: float,
-        y: float,
-        threshold: float = 6.0,
-    ) -> bool:
-        if abs(py - y) > threshold:
-            return False
-        return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
 
     def save_diagram(self, path: Path):
         self.root.update()
@@ -380,14 +329,27 @@ class DiagramApp:
         self.root.mainloop()
 
 
+def _build_ports(value: str, prefix: str) -> list[str]:
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        count = int(text)
+    except ValueError:
+        raise ValueError(f"포트 개수는 숫자로 입력해야 합니다: {value}")
+    if count < 0:
+        raise ValueError(f"포트 개수는 0 이상이어야 합니다: {value}")
+    return [f"{prefix}{idx}" for idx in range(1, count + 1)]
+
+
 def parse_blocks(path: Path) -> dict[str, Node]:
     config = configparser.ConfigParser()
     config.read(path)
     nodes: dict[str, Node] = {}
     x, y = 80, 80
     for section in config.sections():
-        inputs = [p.strip() for p in config.get(section, "in", fallback="").split(",") if p.strip()]
-        outputs = [p.strip() for p in config.get(section, "out", fallback="").split(",") if p.strip()]
+        inputs = _build_ports(config.get(section, "in", fallback=""), "in")
+        outputs = _build_ports(config.get(section, "out", fallback=""), "out")
         node = Node(
             name=section,
             kind="BLOCK",

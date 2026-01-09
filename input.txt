@@ -1,11 +1,11 @@
 [BlockA]
-in = a_in
-out = a_out
+in = 1
+out = 1
 
 [BlockB]
-in = b_in
-out = b_out
+in = 1
+out = 1
 
 [BlockC]
-in = c_in
-out = c_out
+in = 1
+out = 1

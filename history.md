@@ -5,3 +5,5 @@ Remove bend editing and add gate_symbol.txt plus orthogonal auto-routing.
 Rename gate_symbol.json and allow dragging the vertical elbow; reset on node move.
 Remove gate_symbol.json and draw AND gate directly on the canvas.
 Refine AND gate outline and allow dragging horizontal wire segments.
+Fix indentation bug when updating wire coordinates.
+Remove horizontal wire dragging and switch block ports to count-based definitions.
