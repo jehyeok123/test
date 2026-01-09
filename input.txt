@@ -1,0 +1,11 @@
+[BlockA]
+in = a_in
+out = a_out
+
+[BlockB]
+in = b_in
+out = b_out
+
+[BlockC]
+in = c_in
+out = c_out
