@@ -8,3 +8,4 @@ Refine AND gate outline and allow dragging horizontal wire segments.
 Fix indentation bug when updating wire coordinates.
 Remove horizontal wire dragging and switch block ports to count-based definitions.
 Enable dragging port positions via horizontal wire segments and update port/block styling.
+Allow block sizing overrides and wire labels from connections.txt.

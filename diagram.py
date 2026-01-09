@@ -25,6 +25,7 @@ class Node:
     y: int
     width: int = 160
     height: int = 100
+    base_height: int = 100
     items: list[int] = field(default_factory=list)
 
 
@@ -34,6 +35,8 @@ class Connection:
     dst: tuple[str, str]
     line_id: int | None = None
     manual_mid_x: float | None = None
+    label: str | None = None
+    label_id: int | None = None
 
 
 class DiagramApp:
@@ -113,10 +116,16 @@ class DiagramApp:
             rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#e0e0e0", outline="#666666", width=2)
             node.items.append(rect)
         if node.kind == "BLOCK":
-            label = self.canvas.create_text((x1 + x2) / 2, y1 + 16, text=node.name, font=("Arial", 12, "bold"))
+            label = self.canvas.create_text(
+                x1 + 6,
+                y1 + 6,
+                text=node.name,
+                font=("Arial", 12, "bold"),
+                anchor="nw",
+            )
             node.items.append(label)
 
-        port_gap = max(node.height - 60, 40)
+        port_gap = max(node.base_height - 60, 40)
         connected_inputs = [port for port in node.inputs if port.connected]
         if connected_inputs:
             input_step = port_gap // max(len(connected_inputs), 1)
@@ -176,6 +185,16 @@ class DiagramApp:
         )
         self.canvas.addtag_withtag("wire", line)
         connection.line_id = line
+        if connection.label:
+            label_x, label_y = self._label_position(coords)
+            label_id = self.canvas.create_text(
+                label_x,
+                label_y,
+                text=connection.label,
+                font=("Arial", 6),
+                anchor="s",
+            )
+            connection.label_id = label_id
 
     def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str) -> int | None:
         node = self.nodes.get(node_name)
@@ -244,6 +263,7 @@ class DiagramApp:
                 connection.line_id,
                 *coords,
             )
+            self._update_label(connection, coords)
 
     def _connection_coords(
         self,
@@ -257,6 +277,21 @@ class DiagramApp:
             return [x1, y1, x2, y2]
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+
+    def _label_position(self, coords: list[float]) -> tuple[float, float]:
+        if len(coords) >= 8:
+            x1, y1, x2 = coords[0], coords[1], coords[2]
+            return ((x1 + x2) / 2, y1 - 4)
+        x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
+        mid_x = (x1 + x2) / 2
+        top_y = min(y1, y2) - 4
+        return (mid_x, top_y)
+
+    def _update_label(self, connection: Connection, coords: list[float]):
+        if not connection.label_id:
+            return
+        label_x, label_y = self._label_position(coords)
+        self.canvas.coords(connection.label_id, label_x, label_y)
 
     def _find_port(self, node_name: str, port_name: str, kind: str) -> tuple[Node, Port] | None:
         node = self.nodes.get(node_name)
@@ -431,6 +466,9 @@ def parse_blocks(path: Path) -> dict[str, Node]:
     for section in config.sections():
         inputs = _build_ports(config.get(section, "in", fallback=""), "in")
         outputs = _build_ports(config.get(section, "out", fallback=""), "out")
+        base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+        width = config.getint(section, "width", fallback=160)
+        height = config.getint(section, "height", fallback=base_height)
         node = Node(
             name=section,
             kind="BLOCK",
@@ -438,7 +476,9 @@ def parse_blocks(path: Path) -> dict[str, Node]:
             outputs=[Port(name=p, kind="out") for p in outputs],
             x=x,
             y=y,
-            height=max(100, 40 + 20 * max(len(inputs), len(outputs), 1)),
+            width=width,
+            height=height,
+            base_height=base_height,
         )
         nodes[section] = node
         y += 160
@@ -458,6 +498,7 @@ def parse_connections(
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        line, label = _split_label(line)
         gate_match = re.match(r"^(AND|OR|MUX)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$", line)
         if gate_match:
             gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
@@ -472,14 +513,17 @@ def parse_connections(
                 y=120 + gate_index * 40,
                 width=120,
                 height=80,
+                base_height=80,
             )
             nodes[gate_name] = gate_node
             gate_index += 1
             for idx, source in enumerate(inputs):
                 src_node, src_port = source.split(".", 1)
-                connections.append(Connection(src=(src_node, src_port), dst=(gate_name, f"in{idx+1}")))
+                connections.append(
+                    Connection(src=(src_node, src_port), dst=(gate_name, f"in{idx+1}"), label=label)
+                )
             dst_node, dst_port = output.split(".", 1)
-            connections.append(Connection(src=(gate_name, "out"), dst=(dst_node, dst_port)))
+            connections.append(Connection(src=(gate_name, "out"), dst=(dst_node, dst_port), label=label))
             continue
 
         direct_match = re.match(r"^(\S+)\s*->\s*(\S+)$", line)
@@ -487,11 +531,20 @@ def parse_connections(
             src, dst = direct_match.groups()
             src_node, src_port = src.split(".", 1)
             dst_node, dst_port = dst.split(".", 1)
-            connections.append(Connection(src=(src_node, src_port), dst=(dst_node, dst_port)))
+            connections.append(Connection(src=(src_node, src_port), dst=(dst_node, dst_port), label=label))
             continue
 
         raise ValueError(f"연결 형식을 파싱할 수 없습니다: {line}")
     return connections
+
+
+def _split_label(line: str) -> tuple[str, str | None]:
+    if "|" not in line:
+        return line, None
+    base, raw_label = line.split("|", 1)
+    label = raw_label.strip()
+    label = label.replace("\\n", "\n")
+    return base.strip(), label if label else None
 
 
 def validate_connections(nodes: dict[str, Node], connections: list[Connection], log_path: Path) -> bool:

@@ -12,6 +12,8 @@ AND 게이트는 캔버스에 직접 그리는 D형(직선+반원) 형태이며 
 AND 게이트의 in/out 포트는 도형 중심선을 기준으로 배치됩니다.
 포트 이름 텍스트는 표시하지 않으며 입력/출력 포트는 검은색 점으로 표시됩니다.
 블록 내부 색상은 연한 회색으로 표시됩니다.
+블록 크기는 `width`, `height`로 지정할 수 있으며 높이가 바뀌어도 포트/배선의 기본 위치는 유지됩니다.
+블록 폭이 바뀌면 입력 포트는 왼쪽, 출력 포트는 오른쪽에 맞춰집니다.
 
 ## 사용 방법
 
@@ -33,6 +35,8 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
 [BlockA]
 in = 2
 out = 1
+width = 180
+height = 120
 ```
 
 `in`, `out`에는 포트 개수를 숫자로 입력합니다. 포트 이름은 `in1`, `in2`, `out1`처럼 자동 생성됩니다.
@@ -40,8 +44,8 @@ out = 1
 ## 연결 정의 (connections.txt)
 
 ```text
-BlockA.out1 -> BlockB.in1
-AND Gate1: BlockA.out1, BlockB.out1 -> BlockC.in1
+BlockA.out1 -> BlockB.in1 | cnt1[10:0]\ncnt2[10:0]
+AND Gate1: BlockA.out1, BlockB.out1 -> BlockC.in1 | and_net
 OR Gate2: BlockA.a_out, BlockB.b_out -> BlockC.c_in
 MUX Gate3: BlockA.a_out, BlockB.b_out -> BlockC.c_in
 ```
