@@ -41,6 +41,8 @@ class Connection:
 
 
 class DiagramApp:
+    GRID_STEP = 20
+
     def __init__(
         self,
         nodes: dict[str, Node],
@@ -260,6 +262,14 @@ class DiagramApp:
             return
         dx = event.x - self._drag_data["x"]
         dy = event.y - self._drag_data["y"]
+        target_x = node.x + dx
+        target_y = node.y + dy
+        snapped_x = self._snap_value(target_x)
+        snapped_y = self._snap_value(target_y)
+        dx = snapped_x - node.x
+        dy = snapped_y - node.y
+        if dx == 0 and dy == 0:
+            return
         self._drag_data["x"] = event.x
         self._drag_data["y"] = event.y
         self.canvas.move(f"node:{node.name}", dx, dy)
@@ -322,22 +332,24 @@ class DiagramApp:
                 old_port_positions.append((port, self._port_center(port.canvas_id)))
         if mode == "left":
             new_width = max(min_width, orig_width - dx)
+            new_width = self._snap_value(new_width, min_width)
             node.x = orig_x + (orig_width - new_width)
             node.width = new_width
             for connection in self.connections:
                 connection.manual_mid_x = None
         elif mode == "right":
-            node.width = max(min_width, orig_width + dx)
+            node.width = self._snap_value(max(min_width, orig_width + dx), min_width)
             for connection in self.connections:
                 connection.manual_mid_x = None
         elif mode == "top":
             new_height = max(min_height, orig_height - dy)
+            new_height = self._snap_value(new_height, min_height)
             node.y = orig_y + (orig_height - new_height)
             node.height = new_height
             for port, prev in old_port_positions:
                 port.manual_y = prev[1]
         elif mode == "bottom":
-            node.height = max(min_height, orig_height + dy)
+            node.height = self._snap_value(max(min_height, orig_height + dy), min_height)
         self._redraw_node(node)
         self._update_connections()
 
@@ -353,6 +365,12 @@ class DiagramApp:
             self.canvas.delete(item)
         node.items.clear()
         self._draw_node(node)
+
+    def _snap_value(self, value: float, min_value: int | None = None) -> int:
+        snapped = int(round(value / self.GRID_STEP) * self.GRID_STEP)
+        if min_value is not None:
+            return max(min_value, snapped)
+        return snapped
 
     def _update_connections(self):
         for connection in self.connections:
