@@ -33,6 +33,8 @@ class Connection:
     dst: tuple[str, str]
     line_id: int | None = None
     manual_mid_x: float | None = None
+    manual_y1: float | None = None
+    manual_y2: float | None = None
 
 
 class DiagramApp:
@@ -50,7 +52,7 @@ class DiagramApp:
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
-        self._drag_wire = {"connection": None, "offset": 0.0}
+        self._drag_wire = {"connection": None, "offset": 0.0, "mode": None}
         self._build_ui()
 
     def _build_ui(self):
@@ -78,8 +80,8 @@ class DiagramApp:
                 mid_x,
                 y2,
                 fill="#f0f5ff",
-                outline="#1f3b74",
-                width=2,
+                outline="",
+                width=0,
             )
             arc = self.canvas.create_arc(
                 mid_x - (x2 - x1) / 2,
@@ -90,23 +92,43 @@ class DiagramApp:
                 extent=180,
                 style=tk.PIESLICE,
                 fill="#f0f5ff",
+                outline="",
+                width=0,
+            )
+            left = self.canvas.create_line(x1, y1, x1, y2, fill="#1f3b74", width=2)
+            top = self.canvas.create_line(x1, y1, mid_x, y1, fill="#1f3b74", width=2)
+            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill="#1f3b74", width=2)
+            outline_arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.ARC,
                 outline="#1f3b74",
                 width=2,
             )
-            node.items.extend([rect, arc])
+            node.items.extend([rect, arc, left, top, bottom, outline_arc])
         else:
             rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
             node.items.append(rect)
-        label = self.canvas.create_text((x1 + x2) / 2, y1 + 16, text=node.name, font=("Arial", 12, "bold"))
-        kind_label = self.canvas.create_text((x1 + x2) / 2, y1 + 34, text=node.kind, font=("Arial", 9))
-        node.items.extend([label, kind_label])
+        if node.kind == "BLOCK":
+            label = self.canvas.create_text((x1 + x2) / 2, y1 + 16, text=node.name, font=("Arial", 12, "bold"))
+            node.items.append(label)
 
         port_gap = max(node.height - 60, 40)
         connected_inputs = [port for port in node.inputs if port.connected]
         if connected_inputs:
             input_step = port_gap // max(len(connected_inputs), 1)
+            center_y = (y1 + y2) / 2
             for idx, port in enumerate(connected_inputs, start=1):
-                px, py = x1, y1 + 50 + idx * input_step
+                if node.kind == "AND" and len(connected_inputs) >= 2:
+                    spacing = 20
+                    offset = spacing * (idx - (len(connected_inputs) + 1) / 2)
+                    px, py = x1, center_y + offset
+                else:
+                    px, py = x1, y1 + 50 + idx * input_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#6c7ae0")
                 text_id = self.canvas.create_text(px + 12, py, text=port.name, anchor="w", font=("Arial", 9))
                 port.canvas_id = port_id
@@ -115,8 +137,12 @@ class DiagramApp:
         connected_outputs = [port for port in node.outputs if port.connected]
         if connected_outputs:
             output_step = port_gap // max(len(connected_outputs), 1)
+            center_y = (y1 + y2) / 2
             for idx, port in enumerate(connected_outputs, start=1):
-                px, py = x2, y1 + 50 + idx * output_step
+                if node.kind == "AND":
+                    px, py = x2, center_y
+                else:
+                    px, py = x2, y1 + 50 + idx * output_step
                 port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#28a745")
                 text_id = self.canvas.create_text(px - 12, py, text=port.name, anchor="e", font=("Arial", 9))
                 port.canvas_id = port_id
@@ -135,7 +161,13 @@ class DiagramApp:
             return
         x1, y1 = self._port_center(src_port_id)
         x2, y2 = self._port_center(dst_port_id)
-        coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+        coords = self._connection_coords(
+            (x1, y1),
+            (x2, y2),
+            connection.manual_mid_x,
+            connection.manual_y1,
+            connection.manual_y2,
+        )
         line = self.canvas.create_line(
             *coords,
             smooth=False,
@@ -189,6 +221,8 @@ class DiagramApp:
         node.y += dy
         for connection in self.connections:
             connection.manual_mid_x = None
+            connection.manual_y1 = None
+            connection.manual_y2 = None
         self._update_connections()
 
     def _update_connections(self):
@@ -201,7 +235,13 @@ class DiagramApp:
                 continue
             x1, y1 = self._port_center(src_id)
             x2, y2 = self._port_center(dst_id)
-            coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+        coords = self._connection_coords(
+            (x1, y1),
+            (x2, y2),
+            connection.manual_mid_x,
+            connection.manual_y1,
+            connection.manual_y2,
+        )
             self.canvas.coords(
                 connection.line_id,
                 *coords,
@@ -212,13 +252,24 @@ class DiagramApp:
         start: tuple[float, float],
         end: tuple[float, float],
         manual_mid_x: float | None = None,
+        manual_y1: float | None = None,
+        manual_y2: float | None = None,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
         if x1 == x2 or y1 == y2:
             return [x1, y1, x2, y2]
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
-        return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+        y1a = manual_y1 if manual_y1 is not None else y1
+        y2a = manual_y2 if manual_y2 is not None else y2
+        coords = [x1, y1]
+        if y1a != y1:
+            coords.extend([x1, y1a])
+        coords.extend([mid_x, y1a, mid_x, y2a])
+        if y2a != y2:
+            coords.extend([x2, y2a])
+        coords.extend([x2, y2])
+        return coords
 
 
     def _on_wire_press(self, event):
@@ -229,33 +280,63 @@ class DiagramApp:
         connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
         if not connection:
             return
-        coords = self.canvas.coords(line_id)
-        if len(coords) != 8:
+        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+        if not src_id or not dst_id:
+            return
+        start = self._port_center(src_id)
+        end = self._port_center(dst_id)
+        coords = self._connection_coords(start, end, connection.manual_mid_x, connection.manual_y1, connection.manual_y2)
+        if len(coords) < 8:
             return
         mid_x = coords[2]
-        y1 = coords[3]
-        y2 = coords[5]
-        if not self._near_vertical_segment(event.x, event.y, mid_x, y1, y2):
+        y1a = coords[3]
+        y2a = coords[5]
+        if self._near_vertical_segment(event.x, event.y, mid_x, y1a, y2a):
+            self._drag_wire["connection"] = connection
+            self._drag_wire["offset"] = event.x - mid_x
+            self._drag_wire["mode"] = "vertical"
             return
-        self._drag_wire["connection"] = connection
-        self._drag_wire["offset"] = event.x - mid_x
+        if self._near_horizontal_segment(event.x, event.y, start[0], mid_x, y1a):
+            self._drag_wire["connection"] = connection
+            self._drag_wire["offset"] = event.y - y1a
+            self._drag_wire["mode"] = "top"
+            return
+        if self._near_horizontal_segment(event.x, event.y, mid_x, end[0], y2a):
+            self._drag_wire["connection"] = connection
+            self._drag_wire["offset"] = event.y - y2a
+            self._drag_wire["mode"] = "bottom"
+            return
 
     def _on_wire_motion(self, event):
         connection: Connection | None = self._drag_wire["connection"]
         if not connection:
             return
-        connection.manual_mid_x = event.x - self._drag_wire["offset"]
+        mode = self._drag_wire["mode"]
+        if mode == "vertical":
+            connection.manual_mid_x = event.x - self._drag_wire["offset"]
+        elif mode == "top":
+            connection.manual_y1 = event.y - self._drag_wire["offset"]
+        elif mode == "bottom":
+            connection.manual_y2 = event.y - self._drag_wire["offset"]
         src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
         dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
         if not src_id or not dst_id:
             return
         x1, y1 = self._port_center(src_id)
         x2, y2 = self._port_center(dst_id)
-        coords = self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+        coords = self._connection_coords(
+            (x1, y1),
+            (x2, y2),
+            connection.manual_mid_x,
+            connection.manual_y1,
+            connection.manual_y2,
+        )
         self.canvas.coords(connection.line_id, *coords)
 
     def _on_wire_release(self, _event):
         self._drag_wire["connection"] = None
+        self._drag_wire["mode"] = None
 
     def _near_vertical_segment(
         self,
@@ -269,6 +350,19 @@ class DiagramApp:
         if abs(px - x) > threshold:
             return False
         return min(y1, y2) - threshold <= py <= max(y1, y2) + threshold
+
+    def _near_horizontal_segment(
+        self,
+        px: float,
+        py: float,
+        x1: float,
+        x2: float,
+        y: float,
+        threshold: float = 6.0,
+    ) -> bool:
+        if abs(py - y) > threshold:
+            return False
+        return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
 
     def save_diagram(self, path: Path):
         self.root.update()
