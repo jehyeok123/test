@@ -55,6 +55,7 @@ class DiagramApp:
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
+        self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
         self._build_ui()
 
     def _build_ui(self):
@@ -209,14 +210,29 @@ class DiagramApp:
         if not node_tag:
             return
         node_name = node_tag.split(":", 1)[1]
-        self._drag_data["node"] = self.nodes[node_name]
+        node = self.nodes[node_name]
+        resize_mode = self._hit_test_edge(node, event.x, event.y)
+        if resize_mode:
+            self._resize_data["node"] = node
+            self._resize_data["mode"] = resize_mode
+            self._resize_data["x"] = event.x
+            self._resize_data["y"] = event.y
+            self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+            return
+        self._drag_data["node"] = node
         self._drag_data["x"] = event.x
         self._drag_data["y"] = event.y
 
     def _on_release(self, _event):
         self._drag_data["node"] = None
+        self._resize_data["node"] = None
+        self._resize_data["mode"] = None
+        self._resize_data["orig"] = None
 
     def _on_motion(self, event):
+        if self._resize_data["node"] is not None:
+            self._on_resize_motion(event)
+            return
         node = self._drag_data["node"]
         if not node:
             return
@@ -233,6 +249,65 @@ class DiagramApp:
         for connection in self.connections:
             connection.manual_mid_x = None
         self._update_connections()
+
+    def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
+        if node.kind != "BLOCK":
+            return None
+        left = node.x
+        right = node.x + node.width
+        top = node.y
+        bottom = node.y + node.height
+        if left - threshold <= x <= right + threshold and abs(y - top) <= threshold:
+            return "top"
+        if left - threshold <= x <= right + threshold and abs(y - bottom) <= threshold:
+            return "bottom"
+        if top - threshold <= y <= bottom + threshold and abs(x - left) <= threshold:
+            return "left"
+        if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
+            return "right"
+        return None
+
+    def _on_resize_motion(self, event):
+        node = self._resize_data["node"]
+        mode = self._resize_data["mode"]
+        orig = self._resize_data["orig"]
+        if not node or not mode or not orig:
+            return
+        orig_x, orig_y, orig_width, orig_height = orig
+        dx = event.x - self._resize_data["x"]
+        dy = event.y - self._resize_data["y"]
+        min_width = 80
+        min_height = 60
+        old_port_positions = []
+        for port in node.inputs + node.outputs:
+            if port.canvas_id:
+                old_port_positions.append((port, self._port_center(port.canvas_id)))
+        if mode == "left":
+            new_width = max(min_width, orig_width - dx)
+            node.x = orig_x + (orig_width - new_width)
+            node.width = new_width
+            for connection in self.connections:
+                connection.manual_mid_x = None
+        elif mode == "right":
+            node.width = max(min_width, orig_width + dx)
+            for connection in self.connections:
+                connection.manual_mid_x = None
+        elif mode == "top":
+            new_height = max(min_height, orig_height - dy)
+            node.y = orig_y + (orig_height - new_height)
+            node.height = new_height
+            for port, prev in old_port_positions:
+                port.manual_y = prev[1]
+        elif mode == "bottom":
+            node.height = max(min_height, orig_height + dy)
+        self._redraw_node(node)
+        self._update_connections()
+
+    def _redraw_node(self, node: Node):
+        for item in node.items:
+            self.canvas.delete(item)
+        node.items.clear()
+        self._draw_node(node)
 
     def _update_connections(self):
         for connection in self.connections:
@@ -389,6 +464,8 @@ class DiagramApp:
         mode = self._drag_wire["mode"]
         if mode == "mid":
             connection.manual_mid_x = event.x - self._drag_wire["offset"]
+            if not connection.src or not connection.dst:
+                return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
             dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
             if not src_id or not dst_id:
@@ -497,8 +574,6 @@ def parse_blocks(path: Path) -> dict[str, Node]:
         inputs = _build_ports(config.get(section, "in", fallback=""), "in")
         outputs = _build_ports(config.get(section, "out", fallback=""), "out")
         base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
-        width = config.getint(section, "width", fallback=160)
-        height = config.getint(section, "height", fallback=base_height)
         node = Node(
             name=section,
             kind="BLOCK",
@@ -506,8 +581,8 @@ def parse_blocks(path: Path) -> dict[str, Node]:
             outputs=[Port(name=p, kind="out") for p in outputs],
             x=x,
             y=y,
-            width=width,
-            height=height,
+            width=160,
+            height=base_height,
             base_height=base_height,
         )
         nodes[section] = node

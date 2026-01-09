@@ -10,3 +10,4 @@ Remove horizontal wire dragging and switch block ports to count-based definition
 Enable dragging port positions via horizontal wire segments and update port/block styling.
 Allow block sizing overrides and wire labels from connections.txt.
 Hide port dots and allow one-sided connections with fixed-length stubs.
+Add edge drag resizing for blocks and remove width/height config.
