@@ -224,6 +224,7 @@ class DiagramApp:
             return
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
+        self._raise_node_and_wires(node.name)
         if node.resize_enabled:
             resize_mode = self._hit_test_edge(node, event.x, event.y)
             if resize_mode:
@@ -365,12 +366,27 @@ class DiagramApp:
             self.canvas.delete(item)
         node.items.clear()
         self._draw_node(node)
+        self._raise_node_and_wires(node.name)
 
     def _snap_value(self, value: float, min_value: int | None = None) -> int:
         snapped = int(round(value / self.GRID_STEP) * self.GRID_STEP)
         if min_value is not None:
             return max(min_value, snapped)
         return snapped
+
+    def _raise_node_and_wires(self, node_name: str):
+        self.canvas.tag_raise(f"node:{node_name}")
+        for connection in self.connections:
+            if connection.src and connection.src[0] == node_name:
+                self._raise_connection(connection)
+            if connection.dst and connection.dst[0] == node_name:
+                self._raise_connection(connection)
+
+    def _raise_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.tag_raise(connection.line_id)
+        if connection.label_id:
+            self.canvas.tag_raise(connection.label_id)
 
     def _update_connections(self):
         for connection in self.connections:
