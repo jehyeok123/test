@@ -99,7 +99,8 @@ class DiagramApp:
         dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
         if not src_port_id or not dst_port_id:
             return
-        x1, y1, x2, y2 = self._port_center(src_port_id), self._port_center(dst_port_id)
+        x1, y1 = self._port_center(src_port_id)
+        x2, y2 = self._port_center(dst_port_id)
         line = self.canvas.create_line(
             x1[0], x1[1],
             (x1[0] + x2[0]) / 2, x1[1],
