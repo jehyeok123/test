@@ -12,6 +12,7 @@ class Port:
     kind: str
     canvas_id: int | None = None
     connected: bool = True
+    manual_y: float | None = None
 
 
 @dataclass
@@ -50,7 +51,7 @@ class DiagramApp:
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
-        self._drag_wire = {"connection": None, "offset": 0.0}
+        self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
         self._build_ui()
 
     def _build_ui(self):
@@ -77,7 +78,7 @@ class DiagramApp:
                 y1,
                 mid_x,
                 y2,
-                fill="#f0f5ff",
+                fill="#e0e0e0",
                 outline="",
                 width=0,
             )
@@ -89,13 +90,13 @@ class DiagramApp:
                 start=-90,
                 extent=180,
                 style=tk.PIESLICE,
-                fill="#f0f5ff",
+                fill="#e0e0e0",
                 outline="",
                 width=0,
             )
-            left = self.canvas.create_line(x1, y1, x1, y2, fill="#1f3b74", width=2)
-            top = self.canvas.create_line(x1, y1, mid_x, y1, fill="#1f3b74", width=2)
-            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill="#1f3b74", width=2)
+            left = self.canvas.create_line(x1, y1, x1, y2, fill="#666666", width=2)
+            top = self.canvas.create_line(x1, y1, mid_x, y1, fill="#666666", width=2)
+            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill="#666666", width=2)
             outline_arc = self.canvas.create_arc(
                 mid_x - (x2 - x1) / 2,
                 y1,
@@ -104,12 +105,12 @@ class DiagramApp:
                 start=-90,
                 extent=180,
                 style=tk.ARC,
-                outline="#1f3b74",
+                outline="#666666",
                 width=2,
             )
             node.items.extend([rect, arc, left, top, bottom, outline_arc])
         else:
-            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#f0f5ff", outline="#1f3b74", width=2)
+            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill="#e0e0e0", outline="#666666", width=2)
             node.items.append(rect)
         if node.kind == "BLOCK":
             label = self.canvas.create_text((x1 + x2) / 2, y1 + 16, text=node.name, font=("Arial", 12, "bold"))
@@ -127,10 +128,11 @@ class DiagramApp:
                     px, py = x1, center_y + offset
                 else:
                     px, py = x1, y1 + 50 + idx * input_step
-                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#6c7ae0")
-                text_id = self.canvas.create_text(px + 12, py, text=port.name, anchor="w", font=("Arial", 9))
+                if port.manual_y is not None:
+                    py = port.manual_y
+                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="black", outline="black")
                 port.canvas_id = port_id
-                node.items.extend([port_id, text_id])
+                node.items.append(port_id)
 
         connected_outputs = [port for port in node.outputs if port.connected]
         if connected_outputs:
@@ -141,10 +143,11 @@ class DiagramApp:
                     px, py = x2, center_y
                 else:
                     px, py = x2, y1 + 50 + idx * output_step
-                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="#28a745")
-                text_id = self.canvas.create_text(px - 12, py, text=port.name, anchor="e", font=("Arial", 9))
+                if port.manual_y is not None:
+                    py = port.manual_y
+                port_id = self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill="black", outline="black")
                 port.canvas_id = port_id
-                node.items.extend([port_id, text_id])
+                node.items.append(port_id)
 
         for item in node.items:
             self.canvas.addtag_withtag("node", item)
@@ -215,6 +218,9 @@ class DiagramApp:
         self.canvas.move(f"node:{node.name}", dx, dy)
         node.x += dx
         node.y += dy
+        for port in node.inputs + node.outputs:
+            if port.manual_y is not None:
+                port.manual_y += dy
         for connection in self.connections:
             connection.manual_mid_x = None
         self._update_connections()
@@ -252,6 +258,15 @@ class DiagramApp:
         mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
 
+    def _find_port(self, node_name: str, port_name: str, kind: str) -> tuple[Node, Port] | None:
+        node = self.nodes.get(node_name)
+        if not node:
+            return None
+        ports = node.outputs if kind == "out" else node.inputs
+        for port in ports:
+            if port.name == port_name:
+                return node, port
+        return None
 
     def _on_wire_press(self, event):
         item = self.canvas.find_withtag("current")
@@ -276,28 +291,65 @@ class DiagramApp:
         if self._near_vertical_segment(event.x, event.y, mid_x, y1a, y2a):
             self._drag_wire["connection"] = connection
             self._drag_wire["offset"] = event.x - mid_x
+            self._drag_wire["mode"] = "mid"
+            return
+        if self._near_horizontal_segment(event.x, event.y, coords[0], mid_x, y1a):
+            port_info = self._find_port(connection.src[0], connection.src[1], "out")
+            if not port_info:
+                return
+            node, port = port_info
+            self._reset_mid_for_port(node.name, port.name)
+            self._drag_wire["connection"] = connection
+            self._drag_wire["mode"] = "src_port"
+            self._drag_wire["node"] = node
+            self._drag_wire["port"] = port
+            return
+        if self._near_horizontal_segment(event.x, event.y, mid_x, coords[6], y2a):
+            port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+            if not port_info:
+                return
+            node, port = port_info
+            self._reset_mid_for_port(node.name, port.name)
+            self._drag_wire["connection"] = connection
+            self._drag_wire["mode"] = "dst_port"
+            self._drag_wire["node"] = node
+            self._drag_wire["port"] = port
             return
 
     def _on_wire_motion(self, event):
         connection: Connection | None = self._drag_wire["connection"]
         if not connection:
             return
-        connection.manual_mid_x = event.x - self._drag_wire["offset"]
-        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
-        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
-        if not src_id or not dst_id:
+        mode = self._drag_wire["mode"]
+        if mode == "mid":
+            connection.manual_mid_x = event.x - self._drag_wire["offset"]
+            src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+            dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+            if not src_id or not dst_id:
+                return
+            x1, y1 = self._port_center(src_id)
+            x2, y2 = self._port_center(dst_id)
+            coords = self._connection_coords(
+                (x1, y1),
+                (x2, y2),
+                connection.manual_mid_x,
+            )
+            self.canvas.coords(connection.line_id, *coords)
             return
-        x1, y1 = self._port_center(src_id)
-        x2, y2 = self._port_center(dst_id)
-        coords = self._connection_coords(
-            (x1, y1),
-            (x2, y2),
-            connection.manual_mid_x,
-        )
-        self.canvas.coords(connection.line_id, *coords)
+        if mode in ("src_port", "dst_port"):
+            node = self._drag_wire["node"]
+            port = self._drag_wire["port"]
+            if not node or not port:
+                return
+            kind = "out" if mode == "src_port" else "in"
+            self._move_port(node, port, kind, event.y)
+            return
 
     def _on_wire_release(self, _event):
         self._drag_wire["connection"] = None
+        self._drag_wire["mode"] = None
+        self._drag_wire["port"] = None
+        self._drag_wire["node"] = None
 
     def _near_vertical_segment(
         self,
@@ -312,6 +364,35 @@ class DiagramApp:
             return False
         return min(y1, y2) - threshold <= py <= max(y1, y2) + threshold
 
+    def _near_horizontal_segment(
+        self,
+        px: float,
+        py: float,
+        x1: float,
+        x2: float,
+        y: float,
+        threshold: float = 6.0,
+    ) -> bool:
+        if abs(py - y) > threshold:
+            return False
+        return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
+
+    def _move_port(self, node: Node, port: Port, kind: str, target_y: float):
+        if port.canvas_id is None:
+            return
+        radius = 6
+        min_y = node.y + 10
+        max_y = node.y + node.height - 10
+        new_y = max(min_y, min(target_y, max_y))
+        x = node.x if kind == "in" else node.x + node.width
+        self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
+        port.manual_y = new_y
+        self._update_connections()
+
+    def _reset_mid_for_port(self, node_name: str, port_name: str):
+        for connection in self.connections:
+            if connection.src == (node_name, port_name) or connection.dst == (node_name, port_name):
+                connection.manual_mid_x = None
 
     def save_diagram(self, path: Path):
         self.root.update()
