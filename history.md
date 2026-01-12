@@ -16,3 +16,4 @@ Ensure edge resize continues until mouse release even when leaving the edge.
 Snap block move/resize to 10-unit grid steps.
 Raise selected block and its wires to the front.
 Snap block moves/resizes and port moves to 10-unit steps.
+Snap elbow drag to 5-unit steps and keep elbows when moving ports.

@@ -42,6 +42,7 @@ class Connection:
 
 class DiagramApp:
     GRID_STEP = 10
+    MID_STEP = 5
 
     def __init__(
         self,
@@ -368,6 +369,10 @@ class DiagramApp:
             return max(min_value, snapped)
         return snapped
 
+    @staticmethod
+    def _snap_to_step(value: float, step: int) -> float:
+        return round(value / step) * step
+
     def _raise_node_and_wires(self, node_name: str):
         self.canvas.tag_raise(f"node:{node_name}")
         for connection in self.connections:
@@ -516,7 +521,6 @@ class DiagramApp:
             node, port = port_info
             if node.resize_enabled:
                 return
-            self._reset_mid_for_port(node.name, port.name)
             self._drag_wire["connection"] = connection
             self._drag_wire["mode"] = "src_port"
             self._drag_wire["node"] = node
@@ -531,7 +535,6 @@ class DiagramApp:
             node, port = port_info
             if node.resize_enabled:
                 return
-            self._reset_mid_for_port(node.name, port.name)
             self._drag_wire["connection"] = connection
             self._drag_wire["mode"] = "dst_port"
             self._drag_wire["node"] = node
@@ -544,7 +547,8 @@ class DiagramApp:
             return
         mode = self._drag_wire["mode"]
         if mode == "mid":
-            connection.manual_mid_x = event.x - self._drag_wire["offset"]
+            raw_mid = event.x - self._drag_wire["offset"]
+            connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
             if not connection.src or not connection.dst:
                 return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
@@ -612,11 +616,6 @@ class DiagramApp:
         self.canvas.coords(port.canvas_id, x, new_y, x, new_y)
         port.manual_y = new_y
         self._update_connections()
-
-    def _reset_mid_for_port(self, node_name: str, port_name: str):
-        for connection in self.connections:
-            if connection.src == (node_name, port_name) or connection.dst == (node_name, port_name):
-                connection.manual_mid_x = None
 
     def save_diagram(self, path: Path):
         self.root.update()
