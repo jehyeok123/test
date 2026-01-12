@@ -1,0 +1,5 @@
+# Direct connection
+BlockA.out1 -> BlockB.in1
+
+# Gate connection
+AND2 Gate1: BlockA.out1, BlockB.out1 -> BlockC.in1
