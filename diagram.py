@@ -44,6 +44,7 @@ class Connection:
 class DiagramApp:
     GRID_STEP = 10
     MID_STEP = 5
+    PORT_RADIUS = 5
 
     def __init__(
         self,
@@ -64,12 +65,15 @@ class DiagramApp:
         self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
         self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.port_toggle_button = tk.Button(self.toolbar, text="SHOW/HIDE PORT", command=self._toggle_ports)
+        self.port_toggle_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
         self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
         self._mode = "normal"
+        self._show_ports = True
         self._port_items: dict[int, tuple[str, str]] = {}
         self._selected_ports: list[tuple[str, str]] = []
         self._build_ui()
@@ -93,44 +97,8 @@ class DiagramApp:
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
-        if node.kind == "AND":
-            mid_x = (x1 + x2) / 2
-            rect = self.canvas.create_rectangle(
-                x1,
-                y1,
-                mid_x,
-                y2,
-                fill="#e0e0e0",
-                outline="",
-                width=0,
-            )
-            arc = self.canvas.create_arc(
-                mid_x - (x2 - x1) / 2,
-                y1,
-                x2,
-                y2,
-                start=-90,
-                extent=180,
-                style=tk.PIESLICE,
-                fill="#e0e0e0",
-                outline="",
-                width=0,
-            )
-            left = self.canvas.create_line(x1, y1, x1, y2, fill="#666666", width=2)
-            top = self.canvas.create_line(x1, y1, mid_x, y1, fill="#666666", width=2)
-            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill="#666666", width=2)
-            outline_arc = self.canvas.create_arc(
-                mid_x - (x2 - x1) / 2,
-                y1,
-                x2,
-                y2,
-                start=-90,
-                extent=180,
-                style=tk.ARC,
-                outline="#666666",
-                width=2,
-            )
-            node.items.extend([rect, arc, left, top, bottom, outline_arc])
+        if node.kind != "BLOCK":
+            node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
         else:
             outline_width = 4 if node.resize_enabled else 2
             rect = self.canvas.create_rectangle(
@@ -153,54 +121,45 @@ class DiagramApp:
             )
             node.items.append(label)
 
-        port_gap = max(node.base_height - 60, 40)
         inputs = node.inputs
-        if inputs:
-            input_step = port_gap // max(len(inputs), 1)
-            center_y = (y1 + y2) / 2
-            for idx, port in enumerate(inputs, start=1):
-                if node.kind == "AND" and len(inputs) >= 2:
-                    spacing = 20
-                    offset = spacing * (idx - (len(inputs) + 1) / 2)
-                    px, py = x1, center_y + offset
-                else:
-                    px, py = x1, y1 + 50 + idx * input_step
-                if port.manual_y is not None:
-                    py = port.manual_y
-                port_id = self.canvas.create_oval(
-                    px - 5,
-                    py - 5,
-                    px + 5,
-                    py + 5,
-                    fill=port.color,
-                    outline=port.color,
-                )
-                port.canvas_id = port_id
-                node.items.append(port_id)
-                self._register_port(node.name, port)
-
         outputs = node.outputs
-        if outputs:
-            output_step = port_gap // max(len(outputs), 1)
-            center_y = (y1 + y2) / 2
-            for idx, port in enumerate(outputs, start=1):
-                if node.kind == "AND":
-                    px, py = x2, center_y
-                else:
+        if node.kind == "BLOCK":
+            port_gap = max(node.base_height - 60, 40)
+            if inputs:
+                input_step = port_gap // max(len(inputs), 1)
+                for idx, port in enumerate(inputs, start=1):
+                    px, py = x1, y1 + 50 + idx * input_step
+                    py = port.manual_y if port.manual_y is not None else py
+                    port_id = self._create_port_oval(px, py, port.color)
+                    port.canvas_id = port_id
+                    node.items.append(port_id)
+                    self._register_port(node.name, port)
+            if outputs:
+                output_step = port_gap // max(len(outputs), 1)
+                for idx, port in enumerate(outputs, start=1):
                     px, py = x2, y1 + 50 + idx * output_step
-                if port.manual_y is not None:
-                    py = port.manual_y
-                port_id = self.canvas.create_oval(
-                    px - 5,
-                    py - 5,
-                    px + 5,
-                    py + 5,
-                    fill=port.color,
-                    outline=port.color,
-                )
-                port.canvas_id = port_id
-                node.items.append(port_id)
-                self._register_port(node.name, port)
+                    py = port.manual_y if port.manual_y is not None else py
+                    port_id = self._create_port_oval(px, py, port.color)
+                    port.canvas_id = port_id
+                    node.items.append(port_id)
+                    self._register_port(node.name, port)
+        else:
+            if inputs:
+                for idx, port in enumerate(inputs, start=1):
+                    py = y1 + (idx / (len(inputs) + 1)) * (y2 - y1)
+                    py = port.manual_y if port.manual_y is not None else py
+                    port_id = self._create_port_oval(x1, py, port.color)
+                    port.canvas_id = port_id
+                    node.items.append(port_id)
+                    self._register_port(node.name, port)
+            if outputs:
+                for idx, port in enumerate(outputs, start=1):
+                    py = y1 + (idx / (len(outputs) + 1)) * (y2 - y1)
+                    py = port.manual_y if port.manual_y is not None else py
+                    port_id = self._create_port_oval(x2, py, port.color)
+                    port.canvas_id = port_id
+                    node.items.append(port_id)
+                    self._register_port(node.name, port)
 
         for item in node.items:
             self.canvas.addtag_withtag("node", item)
@@ -422,6 +381,22 @@ class DiagramApp:
             self.canvas.tag_raise(connection.line_id)
         if connection.label_id:
             self.canvas.tag_raise(connection.label_id)
+
+    def _create_port_oval(self, x: float, y: float, color: str) -> int:
+        radius = self.PORT_RADIUS
+        hidden = not self._show_ports and color == "black"
+        fill = "" if hidden else color
+        outline = "" if hidden else color
+        width = 0 if hidden else 1
+        return self.canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            fill=fill,
+            outline=outline,
+            width=width,
+        )
 
     def _register_port(self, node_name: str, port: Port):
         if port.canvas_id is None:
@@ -671,7 +646,8 @@ class DiagramApp:
         new_y = max(min_y, min(target_y, max_y))
         new_y = self._snap_value(new_y, min_y)
         x = node.x if kind == "in" else node.x + node.width
-        self.canvas.coords(port.canvas_id, x - 5, new_y - 5, x + 5, new_y + 5)
+        radius = self.PORT_RADIUS
+        self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
         port.manual_y = new_y
         self._update_connections()
 
@@ -721,46 +697,89 @@ class DiagramApp:
     def _open_new_block(self):
         window = tk.Toplevel(self.root)
         window.title("New Block")
-        tk.Label(window, text="Name").grid(row=0, column=0, padx=6, pady=6)
+        mode_var = tk.StringVar(value="block")
+        tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
+            row=0, column=0, padx=6, pady=6, sticky="w"
+        )
+        tk.Radiobutton(window, text="Gate", variable=mode_var, value="gate").grid(
+            row=0, column=1, padx=6, pady=6, sticky="w"
+        )
+
+        tk.Label(window, text="Name").grid(row=1, column=0, padx=6, pady=6, sticky="w")
         name_entry = tk.Entry(window)
-        name_entry.grid(row=0, column=1, padx=6, pady=6)
-        tk.Label(window, text="Inputs").grid(row=1, column=0, padx=6, pady=6)
+        name_entry.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Inputs").grid(row=2, column=0, padx=6, pady=6, sticky="w")
         in_entry = tk.Entry(window)
-        in_entry.grid(row=1, column=1, padx=6, pady=6)
-        tk.Label(window, text="Outputs").grid(row=2, column=0, padx=6, pady=6)
+        in_entry.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Outputs").grid(row=3, column=0, padx=6, pady=6, sticky="w")
         out_entry = tk.Entry(window)
-        out_entry.grid(row=2, column=1, padx=6, pady=6)
+        out_entry.grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Gate Type").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        gate_var = tk.StringVar(value="AND2")
+        gate_menu = tk.OptionMenu(window, gate_var, *self._gate_types())
+        gate_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
+
+        def _toggle_fields(*_args):
+            is_gate = mode_var.get() == "gate"
+            state_block = "disabled" if is_gate else "normal"
+            state_gate = "normal" if is_gate else "disabled"
+            in_entry.configure(state=state_block)
+            out_entry.configure(state=state_block)
+            gate_menu.configure(state=state_gate)
+
+        mode_var.trace_add("write", _toggle_fields)
+        _toggle_fields()
 
         def _create_block():
             name = name_entry.get().strip()
             if not name or name in self.nodes:
                 return
-            try:
-                in_count = int(in_entry.get().strip() or "0")
-                out_count = int(out_entry.get().strip() or "0")
-            except ValueError:
-                return
-            inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, in_count + 1)]
-            outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, out_count + 1)]
-            base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
-            x, y = self._next_block_position()
-            node = Node(
-                name=name,
-                kind="BLOCK",
-                inputs=inputs,
-                outputs=outputs,
-                x=x,
-                y=y,
-                width=160,
-                height=base_height,
-                base_height=base_height,
-            )
+            if mode_var.get() == "gate":
+                gate_kind = gate_var.get()
+                gate_def = self._gate_definitions()[gate_kind]
+                inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
+                outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
+                width = gate_def["width"]
+                height = gate_def["height"]
+                x, y = self._next_block_position()
+                node = Node(
+                    name=name,
+                    kind=gate_kind,
+                    inputs=inputs,
+                    outputs=outputs,
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    base_height=height,
+                )
+            else:
+                try:
+                    in_count = int(in_entry.get().strip() or "0")
+                    out_count = int(out_entry.get().strip() or "0")
+                except ValueError:
+                    return
+                inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, in_count + 1)]
+                outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, out_count + 1)]
+                base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+                x, y = self._next_block_position()
+                node = Node(
+                    name=name,
+                    kind="BLOCK",
+                    inputs=inputs,
+                    outputs=outputs,
+                    x=x,
+                    y=y,
+                    width=160,
+                    height=base_height,
+                    base_height=base_height,
+                )
             self.nodes[name] = node
             self._draw_node(node)
             self._raise_node_and_wires(node.name)
             window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=3, column=0, columnspan=2, pady=8)
+        tk.Button(window, text="Create", command=_create_block).grid(row=4, column=0, columnspan=3, pady=8)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -806,7 +825,11 @@ class DiagramApp:
     def _set_port_color(self, port: Port, color: str):
         port.color = color
         if port.canvas_id:
-            self.canvas.itemconfig(port.canvas_id, fill=color, outline=color)
+            hidden = not self._show_ports and color == "black"
+            fill = "" if hidden else color
+            outline = "" if hidden else color
+            width = 0 if hidden else 1
+            self.canvas.itemconfig(port.canvas_id, fill=fill, outline=outline, width=width)
 
     def _set_all_wire_colors(self, color: str):
         for connection in self.connections:
@@ -819,6 +842,152 @@ class DiagramApp:
         if connection.label_id:
             self.canvas.delete(connection.label_id)
         self.connections = [conn for conn in self.connections if conn is not connection]
+
+    def _toggle_ports(self):
+        self._show_ports = not self._show_ports
+        for node in self.nodes.values():
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, port.color)
+
+    def _gate_types(self) -> list[str]:
+        return list(self._gate_definitions().keys())
+
+    def _gate_definitions(self) -> dict[str, dict[str, int]]:
+        return {
+            "AND2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "OR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 40},
+            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 40},
+            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+        }
+
+    def _draw_gate_shape(self, node: Node, x1: float, y1: float, x2: float, y2: float) -> list[int]:
+        kind = node.kind
+        items: list[int] = []
+        outline = "#666666"
+        fill = "#e0e0e0"
+        if kind.startswith("AND"):
+            mid_x = (x1 + x2) / 2
+            rect = self.canvas.create_rectangle(x1, y1, mid_x, y2, fill=fill, outline="", width=0)
+            arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.PIESLICE,
+                fill=fill,
+                outline="",
+                width=0,
+            )
+            left = self.canvas.create_line(x1, y1, x1, y2, fill=outline, width=2)
+            top = self.canvas.create_line(x1, y1, mid_x, y1, fill=outline, width=2)
+            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill=outline, width=2)
+            outline_arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.ARC,
+                outline=outline,
+                width=2,
+            )
+            items.extend([rect, arc, left, top, bottom, outline_arc])
+            return items
+        if kind.startswith("OR"):
+            back = self.canvas.create_line(
+                x1,
+                y1,
+                x1 + (x2 - x1) * 0.3,
+                y2,
+                smooth=True,
+                fill=outline,
+                width=2,
+            )
+            front = self.canvas.create_line(
+                x1 + (x2 - x1) * 0.3,
+                y1,
+                x2,
+                (y1 + y2) / 2,
+                x1 + (x2 - x1) * 0.3,
+                y2,
+                smooth=True,
+                fill=outline,
+                width=2,
+            )
+            fill_poly = self.canvas.create_polygon(
+                x1 + (x2 - x1) * 0.25,
+                y1 + 1,
+                x2 - 1,
+                (y1 + y2) / 2,
+                x1 + (x2 - x1) * 0.25,
+                y2 - 1,
+                x1 + (x2 - x1) * 0.1,
+                y2 - 1,
+                x1 + (x2 - x1) * 0.1,
+                y1 + 1,
+                fill=fill,
+                outline="",
+                smooth=True,
+            )
+            items.extend([fill_poly, back, front])
+            return items
+        if kind.startswith("MUX"):
+            poly = self.canvas.create_polygon(
+                x1,
+                y1,
+                x2,
+                y1 + (y2 - y1) * 0.2,
+                x2,
+                y2 - (y2 - y1) * 0.2,
+                x1,
+                y2,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+            items.append(poly)
+            return items
+        if kind.startswith("DEMUX"):
+            poly = self.canvas.create_polygon(
+                x1,
+                y1 + (y2 - y1) * 0.2,
+                x2,
+                y1,
+                x2,
+                y2,
+                x1,
+                y2 - (y2 - y1) * 0.2,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+            items.append(poly)
+            return items
+        if kind == "DFF":
+            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
+            clock = self.canvas.create_polygon(
+                x1,
+                (y1 + y2) / 2 - 6,
+                x1 + 8,
+                (y1 + y2) / 2,
+                x1,
+                (y1 + y2) / 2 + 6,
+                fill=outline,
+                outline=outline,
+            )
+            items.extend([rect, clock])
+            return items
+        rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
+        items.append(rect)
+        return items
 
     def save_diagram(self, path: Path):
         self.root.update()
@@ -888,7 +1057,10 @@ def parse_connections(
         if not line or line.startswith("#"):
             continue
         line, label = _split_label(line)
-        gate_match = re.match(r"^(AND|OR|MUX)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$", line)
+        gate_match = re.match(
+            r"^(AND2|AND4|OR2|OR4|MUX_2x1|MUX_4x1|DEMUX_1x2|DEMUX_1x4|DFF)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$",
+            line,
+        )
         if gate_match:
             gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
             inputs = [item.strip() for item in inputs_raw.split(",") if item.strip()]
@@ -900,9 +1072,9 @@ def parse_connections(
                 outputs=[Port(name="out", kind="out")],
                 x=400 + gate_index * 40,
                 y=120 + gate_index * 40,
-                width=120,
-                height=80,
-                base_height=80,
+                width=60,
+                height=40,
+                base_height=40,
             )
             nodes[gate_name] = gate_node
             gate_index += 1
