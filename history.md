@@ -19,3 +19,4 @@ Snap block moves/resizes and port moves to 10-unit steps.
 Snap elbow drag to 5-unit steps and keep elbows when moving ports.
 Add NEW/CONNECT/DISCONNECT UI with port dots and interactive wiring modes.
 Add SHOW/HIDE PORT toggle and gate creation options.
+Add bring front/send back controls for selected nodes.

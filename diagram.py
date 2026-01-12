@@ -67,6 +67,10 @@ class DiagramApp:
         self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.port_toggle_button = tk.Button(self.toolbar, text="SHOW/HIDE PORT", command=self._toggle_ports)
         self.port_toggle_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.bring_front_button = tk.Button(self.toolbar, text="BRING FRONT", command=self._bring_active_front)
+        self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
+        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4) 
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
@@ -76,6 +80,7 @@ class DiagramApp:
         self._show_ports = True
         self._port_items: dict[int, tuple[str, str]] = {}
         self._selected_ports: list[tuple[str, str]] = []
+        self._active_node_name: str | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -215,6 +220,7 @@ class DiagramApp:
             return
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
+        self._active_node_name = node.name
         self._raise_node_and_wires(node.name)
         if node.resize_enabled:
             resize_mode = self._hit_test_edge(node, event.x, event.y)
@@ -303,6 +309,7 @@ class DiagramApp:
             return
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
+        self._active_node_name = node.name
         if node.kind != "BLOCK":
             return
         node.resize_enabled = not node.resize_enabled
@@ -381,6 +388,12 @@ class DiagramApp:
             self.canvas.tag_raise(connection.line_id)
         if connection.label_id:
             self.canvas.tag_raise(connection.label_id)
+
+    def _lower_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.tag_lower(connection.line_id)
+        if connection.label_id:
+            self.canvas.tag_lower(connection.label_id)
 
     def _create_port_oval(self, x: float, y: float, color: str) -> int:
         radius = self.PORT_RADIUS
@@ -696,7 +709,7 @@ class DiagramApp:
 
     def _open_new_block(self):
         window = tk.Toplevel(self.root)
-        window.title("New Block")
+        window.title("New")
         mode_var = tk.StringVar(value="block")
         tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
             row=0, column=0, padx=6, pady=6, sticky="w"
@@ -779,7 +792,7 @@ class DiagramApp:
             self._raise_node_and_wires(node.name)
             window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=4, column=0, columnspan=3, pady=8)
+        tk.Button(window, text="Create", command=_create_block).grid(row=5, column=0, columnspan=3, pady=8)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -848,6 +861,21 @@ class DiagramApp:
         for node in self.nodes.values():
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, port.color)
+
+    def _bring_active_front(self):
+        if not self._active_node_name:
+            return
+        self._raise_node_and_wires(self._active_node_name)
+
+    def _send_active_back(self):
+        if not self._active_node_name:
+            return
+        self.canvas.tag_lower(f"node:{self._active_node_name}")
+        for connection in self.connections:
+            if connection.src and connection.src[0] == self._active_node_name:
+                self._lower_connection(connection)
+            if connection.dst and connection.dst[0] == self._active_node_name:
+                self._lower_connection(connection)
 
     def _gate_types(self) -> list[str]:
         return list(self._gate_definitions().keys())
