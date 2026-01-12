@@ -70,7 +70,7 @@ class DiagramApp:
         self.bring_front_button = tk.Button(self.toolbar, text="BRING FRONT", command=self._bring_active_front)
         self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
-        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4) 
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
