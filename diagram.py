@@ -13,6 +13,7 @@ class Port:
     canvas_id: int | None = None
     connected: bool = True
     manual_y: float | None = None
+    color: str = "black"
 
 
 @dataclass
@@ -55,11 +56,22 @@ class DiagramApp:
         self.output_path = output_path
         self.root = tk.Tk()
         self.root.title("Block Diagram")
+        self.toolbar = tk.Frame(self.root)
+        self.toolbar.pack(fill=tk.X)
+        self.new_button = tk.Button(self.toolbar, text="NEW", command=self._open_new_block)
+        self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
+        self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
+        self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
         self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
+        self._mode = "normal"
+        self._port_items: dict[int, tuple[str, str]] = {}
+        self._selected_ports: list[tuple[str, str]] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -71,6 +83,7 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
         self.canvas.tag_bind("node", "<Double-Button-1>", self._on_toggle_resize)
+        self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
@@ -141,37 +154,53 @@ class DiagramApp:
             node.items.append(label)
 
         port_gap = max(node.base_height - 60, 40)
-        connected_inputs = [port for port in node.inputs if port.connected]
-        if connected_inputs:
-            input_step = port_gap // max(len(connected_inputs), 1)
+        inputs = node.inputs
+        if inputs:
+            input_step = port_gap // max(len(inputs), 1)
             center_y = (y1 + y2) / 2
-            for idx, port in enumerate(connected_inputs, start=1):
-                if node.kind == "AND" and len(connected_inputs) >= 2:
+            for idx, port in enumerate(inputs, start=1):
+                if node.kind == "AND" and len(inputs) >= 2:
                     spacing = 20
-                    offset = spacing * (idx - (len(connected_inputs) + 1) / 2)
+                    offset = spacing * (idx - (len(inputs) + 1) / 2)
                     px, py = x1, center_y + offset
                 else:
                     px, py = x1, y1 + 50 + idx * input_step
                 if port.manual_y is not None:
                     py = port.manual_y
-                port_id = self.canvas.create_oval(px, py, px, py, fill="", outline="", width=0)
+                port_id = self.canvas.create_oval(
+                    px - 5,
+                    py - 5,
+                    px + 5,
+                    py + 5,
+                    fill=port.color,
+                    outline=port.color,
+                )
                 port.canvas_id = port_id
                 node.items.append(port_id)
+                self._register_port(node.name, port)
 
-        connected_outputs = [port for port in node.outputs if port.connected]
-        if connected_outputs:
-            output_step = port_gap // max(len(connected_outputs), 1)
+        outputs = node.outputs
+        if outputs:
+            output_step = port_gap // max(len(outputs), 1)
             center_y = (y1 + y2) / 2
-            for idx, port in enumerate(connected_outputs, start=1):
+            for idx, port in enumerate(outputs, start=1):
                 if node.kind == "AND":
                     px, py = x2, center_y
                 else:
                     px, py = x2, y1 + 50 + idx * output_step
                 if port.manual_y is not None:
                     py = port.manual_y
-                port_id = self.canvas.create_oval(px, py, px, py, fill="", outline="", width=0)
+                port_id = self.canvas.create_oval(
+                    px - 5,
+                    py - 5,
+                    px + 5,
+                    py + 5,
+                    fill=port.color,
+                    outline=port.color,
+                )
                 port.canvas_id = port_id
                 node.items.append(port_id)
+                self._register_port(node.name, port)
 
         for item in node.items:
             self.canvas.addtag_withtag("node", item)
@@ -216,6 +245,8 @@ class DiagramApp:
         return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _on_press(self, event):
+        if self._mode != "normal":
+            return
         item = self.canvas.find_withtag("current")
         if not item:
             return
@@ -256,6 +287,8 @@ class DiagramApp:
         self._resize_data["orig"] = None
 
     def _on_motion(self, event):
+        if self._mode != "normal":
+            return
         if self._resize_data["node"] is not None:
             self._on_resize_motion(event)
             return
@@ -300,6 +333,8 @@ class DiagramApp:
         return None
 
     def _on_toggle_resize(self, event):
+        if self._mode != "normal":
+            return
         item = self.canvas.find_withtag("current")
         if not item:
             return
@@ -360,6 +395,7 @@ class DiagramApp:
         for item in node.items:
             self.canvas.delete(item)
         node.items.clear()
+        self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
         self._draw_node(node)
         self._raise_node_and_wires(node.name)
 
@@ -386,6 +422,13 @@ class DiagramApp:
             self.canvas.tag_raise(connection.line_id)
         if connection.label_id:
             self.canvas.tag_raise(connection.label_id)
+
+    def _register_port(self, node_name: str, port: Port):
+        if port.canvas_id is None:
+            return
+        self._port_items[port.canvas_id] = (node_name, port.name)
+        self.canvas.addtag_withtag("port", port.canvas_id)
+        self.canvas.addtag_withtag(f"port:{node_name}:{port.name}", port.canvas_id)
 
     def _update_connections(self):
         for connection in self.connections:
@@ -466,6 +509,19 @@ class DiagramApp:
         return None
 
     def _on_wire_press(self, event):
+        if self._mode == "disconnect":
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            line_id = item[0]
+            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+            if not connection:
+                return
+            self._remove_connection(connection)
+            self._toggle_disconnect_mode()
+            return
+        if self._mode != "normal":
+            return
         item = self.canvas.find_withtag("current")
         if not item:
             return
@@ -565,6 +621,8 @@ class DiagramApp:
             self.canvas.coords(connection.line_id, *coords)
             return
         if mode in ("src_port", "dst_port"):
+            if self._mode != "normal":
+                return
             node = self._drag_wire["node"]
             port = self._drag_wire["port"]
             if not node or not port:
@@ -613,9 +671,154 @@ class DiagramApp:
         new_y = max(min_y, min(target_y, max_y))
         new_y = self._snap_value(new_y, min_y)
         x = node.x if kind == "in" else node.x + node.width
-        self.canvas.coords(port.canvas_id, x, new_y, x, new_y)
+        self.canvas.coords(port.canvas_id, x - 5, new_y - 5, x + 5, new_y + 5)
         port.manual_y = new_y
         self._update_connections()
+
+    def _on_port_press(self, event):
+        if self._mode != "connect":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        port_info = self._port_items.get(item[0])
+        if not port_info:
+            return
+        node_name, port_name = port_info
+        port_data = self._find_port(node_name, port_name, "in") or self._find_port(node_name, port_name, "out")
+        if not port_data:
+            return
+        node, port = port_data
+        if not self._selected_ports:
+            self._selected_ports.append((node_name, port_name))
+            self._set_port_color(port, "blue")
+            return
+        if len(self._selected_ports) == 1:
+            first_node, first_port = self._selected_ports[0]
+            if first_node == node_name:
+                self._reset_connect_mode()
+                return
+            first_port_data = self._find_port(first_node, first_port, "in") or self._find_port(first_node, first_port, "out")
+            if not first_port_data:
+                self._reset_connect_mode()
+                return
+            first_node_obj, first_port_obj = first_port_data
+            if first_port_obj.kind == port.kind:
+                self._reset_connect_mode()
+                return
+            if first_port_obj.kind == "out":
+                src = (first_node, first_port)
+                dst = (node_name, port_name)
+            else:
+                src = (node_name, port_name)
+                dst = (first_node, first_port)
+            connection = Connection(src=src, dst=dst)
+            self.connections.append(connection)
+            self._draw_connection(connection)
+            self._reset_connect_mode()
+            return
+
+    def _open_new_block(self):
+        window = tk.Toplevel(self.root)
+        window.title("New Block")
+        tk.Label(window, text="Name").grid(row=0, column=0, padx=6, pady=6)
+        name_entry = tk.Entry(window)
+        name_entry.grid(row=0, column=1, padx=6, pady=6)
+        tk.Label(window, text="Inputs").grid(row=1, column=0, padx=6, pady=6)
+        in_entry = tk.Entry(window)
+        in_entry.grid(row=1, column=1, padx=6, pady=6)
+        tk.Label(window, text="Outputs").grid(row=2, column=0, padx=6, pady=6)
+        out_entry = tk.Entry(window)
+        out_entry.grid(row=2, column=1, padx=6, pady=6)
+
+        def _create_block():
+            name = name_entry.get().strip()
+            if not name or name in self.nodes:
+                return
+            try:
+                in_count = int(in_entry.get().strip() or "0")
+                out_count = int(out_entry.get().strip() or "0")
+            except ValueError:
+                return
+            inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, in_count + 1)]
+            outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, out_count + 1)]
+            base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+            x, y = self._next_block_position()
+            node = Node(
+                name=name,
+                kind="BLOCK",
+                inputs=inputs,
+                outputs=outputs,
+                x=x,
+                y=y,
+                width=160,
+                height=base_height,
+                base_height=base_height,
+            )
+            self.nodes[name] = node
+            self._draw_node(node)
+            self._raise_node_and_wires(node.name)
+            window.destroy()
+
+        tk.Button(window, text="Create", command=_create_block).grid(row=3, column=0, columnspan=2, pady=8)
+
+    def _next_block_position(self) -> tuple[int, int]:
+        if not self.nodes:
+            return (80, 80)
+        max_y = max(node.y + node.height for node in self.nodes.values())
+        x = 80
+        y = max_y + 60
+        if y > 600:
+            y = 80
+            x = max(node.x + node.width for node in self.nodes.values()) + 60
+        return x, y
+
+    def _toggle_connect_mode(self):
+        if self._mode == "connect":
+            self._reset_connect_mode()
+            return
+        if self._mode == "disconnect":
+            self._toggle_disconnect_mode()
+        self._mode = "connect"
+        self._selected_ports = []
+        self._set_all_port_colors("red")
+
+    def _reset_connect_mode(self):
+        self._selected_ports = []
+        self._set_all_port_colors("black")
+        self._mode = "normal"
+
+    def _toggle_disconnect_mode(self):
+        if self._mode == "disconnect":
+            self._set_all_wire_colors("#333333")
+            self._mode = "normal"
+            return
+        if self._mode == "connect":
+            self._reset_connect_mode()
+        self._mode = "disconnect"
+        self._set_all_wire_colors("red")
+
+    def _set_all_port_colors(self, color: str):
+        for node in self.nodes.values():
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, color)
+
+    def _set_port_color(self, port: Port, color: str):
+        port.color = color
+        if port.canvas_id:
+            self.canvas.itemconfig(port.canvas_id, fill=color, outline=color)
+
+    def _set_all_wire_colors(self, color: str):
+        for connection in self.connections:
+            if connection.line_id:
+                self.canvas.itemconfig(connection.line_id, fill=color)
+
+    def _remove_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.delete(connection.line_id)
+        if connection.label_id:
+            self.canvas.delete(connection.label_id)
+        self.connections = [conn for conn in self.connections if conn is not connection]
 
     def save_diagram(self, path: Path):
         self.root.update()
