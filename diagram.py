@@ -41,7 +41,7 @@ class Connection:
 
 
 class DiagramApp:
-    GRID_STEP = 20
+    GRID_STEP = 10
 
     def __init__(
         self,
@@ -279,8 +279,6 @@ class DiagramApp:
         for port in node.inputs + node.outputs:
             if port.manual_y is not None:
                 port.manual_y += dy
-        for connection in self.connections:
-            connection.manual_mid_x = None
         self._update_connections()
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
@@ -336,12 +334,8 @@ class DiagramApp:
             new_width = self._snap_value(new_width, min_width)
             node.x = orig_x + (orig_width - new_width)
             node.width = new_width
-            for connection in self.connections:
-                connection.manual_mid_x = None
         elif mode == "right":
             node.width = self._snap_value(max(min_width, orig_width + dx), min_width)
-            for connection in self.connections:
-                connection.manual_mid_x = None
         elif mode == "top":
             new_height = max(min_height, orig_height - dy)
             new_height = self._snap_value(new_height, min_height)
@@ -613,6 +607,7 @@ class DiagramApp:
         min_y = node.y + 10
         max_y = node.y + node.height - 10
         new_y = max(min_y, min(target_y, max_y))
+        new_y = self._snap_value(new_y, min_y)
         x = node.x if kind == "in" else node.x + node.width
         self.canvas.coords(port.canvas_id, x, new_y, x, new_y)
         port.manual_y = new_y

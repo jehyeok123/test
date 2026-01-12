@@ -13,5 +13,6 @@ Hide port dots and allow one-sided connections with fixed-length stubs.
 Add edge drag resizing for blocks and remove width/height config.
 Require double-click resize mode to edit block size and disable moves while active.
 Ensure edge resize continues until mouse release even when leaving the edge.
-Snap block move/resize to 20-unit grid steps.
+Snap block move/resize to 10-unit grid steps.
 Raise selected block and its wires to the front.
+Snap block moves/resizes and port moves to 10-unit steps.
