@@ -2,6 +2,7 @@ import configparser
 import re
 import sys
 import tkinter as tk
+from tkinter import simpledialog
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,8 @@ class Port:
     connected: bool = True
     manual_y: float | None = None
     color: str = "black"
+    side: str = "left"
+    offset: float = 0.5
 
 
 @dataclass
@@ -29,6 +32,7 @@ class Node:
     base_height: int = 100
     items: list[int] = field(default_factory=list)
     resize_enabled: bool = False
+    outline_color: str = "#666666"
 
 
 @dataclass
@@ -65,12 +69,18 @@ class DiagramApp:
         self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
         self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.create_port_button = tk.Button(self.toolbar, text="CREATE PORT", command=self._toggle_create_port_mode)
+        self.create_port_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.delete_port_button = tk.Button(self.toolbar, text="DELETE PORT", command=self._toggle_delete_port_mode)
+        self.delete_port_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.port_toggle_button = tk.Button(self.toolbar, text="SHOW/HIDE PORT", command=self._toggle_ports)
         self.port_toggle_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.wire_name_button = tk.Button(self.toolbar, text="WIRE NAME", command=self._toggle_wire_name_mode)
+        self.wire_name_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.bring_front_button = tk.Button(self.toolbar, text="BRING FRONT", command=self._bring_active_front)
         self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
-        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4) 
+        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
@@ -112,7 +122,7 @@ class DiagramApp:
                 x2,
                 y2,
                 fill="#e0e0e0",
-                outline="#666666",
+                outline=node.outline_color,
                 width=outline_width,
             )
             node.items.append(rect)
@@ -126,45 +136,13 @@ class DiagramApp:
             )
             node.items.append(label)
 
-        inputs = node.inputs
-        outputs = node.outputs
-        if node.kind == "BLOCK":
-            port_gap = max(node.base_height - 60, 40)
-            if inputs:
-                input_step = port_gap // max(len(inputs), 1)
-                for idx, port in enumerate(inputs, start=1):
-                    px, py = x1, y1 + 50 + idx * input_step
-                    py = port.manual_y if port.manual_y is not None else py
-                    port_id = self._create_port_oval(px, py, port.color)
-                    port.canvas_id = port_id
-                    node.items.append(port_id)
-                    self._register_port(node.name, port)
-            if outputs:
-                output_step = port_gap // max(len(outputs), 1)
-                for idx, port in enumerate(outputs, start=1):
-                    px, py = x2, y1 + 50 + idx * output_step
-                    py = port.manual_y if port.manual_y is not None else py
-                    port_id = self._create_port_oval(px, py, port.color)
-                    port.canvas_id = port_id
-                    node.items.append(port_id)
-                    self._register_port(node.name, port)
-        else:
-            if inputs:
-                for idx, port in enumerate(inputs, start=1):
-                    py = y1 + (idx / (len(inputs) + 1)) * (y2 - y1)
-                    py = port.manual_y if port.manual_y is not None else py
-                    port_id = self._create_port_oval(x1, py, port.color)
-                    port.canvas_id = port_id
-                    node.items.append(port_id)
-                    self._register_port(node.name, port)
-            if outputs:
-                for idx, port in enumerate(outputs, start=1):
-                    py = y1 + (idx / (len(outputs) + 1)) * (y2 - y1)
-                    py = port.manual_y if port.manual_y is not None else py
-                    port_id = self._create_port_oval(x2, py, port.color)
-                    port.canvas_id = port_id
-                    node.items.append(port_id)
-                    self._register_port(node.name, port)
+        ports = node.inputs + node.outputs
+        for port in ports:
+            px, py = self._port_position(node, port)
+            port_id = self._create_port_oval(px, py, port.color)
+            port.canvas_id = port_id
+            node.items.append(port_id)
+            self._register_port(node.name, port)
 
         for item in node.items:
             self.canvas.addtag_withtag("node", item)
@@ -194,12 +172,11 @@ class DiagramApp:
             )
             connection.label_id = label_id
 
-    def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str) -> int | None:
+    def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str | None = None) -> int | None:
         node = self.nodes.get(node_name)
         if not node:
             return None
-        ports = node.outputs if kind == "out" else node.inputs
-        for port in ports:
+        for port in node.inputs + node.outputs:
             if port.name == port_name:
                 return port.canvas_id
         return None
@@ -209,6 +186,9 @@ class DiagramApp:
         return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _on_press(self, event):
+        if self._mode == "create_port":
+            self._handle_create_port_click(event)
+            return
         if self._mode != "normal":
             return
         item = self.canvas.find_withtag("current")
@@ -275,9 +255,6 @@ class DiagramApp:
         self.canvas.move(f"node:{node.name}", dx, dy)
         node.x += dx
         node.y += dy
-        for port in node.inputs + node.outputs:
-            if port.manual_y is not None:
-                port.manual_y += dy
         self._update_connections()
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
@@ -296,6 +273,30 @@ class DiagramApp:
         if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
             return "right"
         return None
+
+    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
+        left = node.x
+        right = node.x + node.width
+        top = node.y
+        bottom = node.y + node.height
+        if left - threshold <= x <= right + threshold and abs(y - top) <= threshold:
+            return "top"
+        if left - threshold <= x <= right + threshold and abs(y - bottom) <= threshold:
+            return "bottom"
+        if top - threshold <= y <= bottom + threshold and abs(x - left) <= threshold:
+            return "left"
+        if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
+            return "right"
+        return None
+
+    def _edge_offset(self, node: Node, side: str, x: float, y: float) -> float:
+        if side in ("left", "right"):
+            if node.height == 0:
+                return 0.5
+            return max(0.0, min(1.0, (y - node.y) / node.height))
+        if node.width == 0:
+            return 0.5
+        return max(0.0, min(1.0, (x - node.x) / node.width))
 
     def _on_toggle_resize(self, event):
         if self._mode != "normal":
@@ -411,6 +412,24 @@ class DiagramApp:
             width=width,
         )
 
+    def _port_position(self, node: Node, port: Port) -> tuple[float, float]:
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        if port.side == "left":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x1, py)
+        if port.side == "right":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x2, py)
+        if port.side == "top":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y1)
+        if port.side == "bottom":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y2)
+        py = port.manual_y if port.manual_y is not None else (y1 + y2) / 2
+        return (x1, py)
+
     def _register_port(self, node_name: str, port: Port):
         if port.canvas_id is None:
             return
@@ -486,17 +505,46 @@ class DiagramApp:
         label_x, label_y = self._label_position(coords)
         self.canvas.coords(connection.label_id, label_x, label_y)
 
-    def _find_port(self, node_name: str, port_name: str, kind: str) -> tuple[Node, Port] | None:
+    def _find_port(self, node_name: str, port_name: str, kind: str | None = None) -> tuple[Node, Port] | None:
         node = self.nodes.get(node_name)
         if not node:
             return None
-        ports = node.outputs if kind == "out" else node.inputs
-        for port in ports:
+        for port in node.inputs + node.outputs:
             if port.name == port_name:
                 return node, port
         return None
 
     def _on_wire_press(self, event):
+        if self._mode == "wire_name":
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            line_id = item[0]
+            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+            if not connection:
+                return
+            label = simpledialog.askstring("WIRE NAME", "Wire name:")
+            if label is not None:
+                connection.label = label
+                if connection.label_id is None:
+                    coords = self._connection_line_coords(connection)
+                    if coords:
+                        label_x, label_y = self._label_position(coords)
+                        connection.label_id = self.canvas.create_text(
+                            label_x,
+                            label_y,
+                            text=label,
+                            font=("Arial", 6),
+                            anchor="s",
+                        )
+                else:
+                    self.canvas.itemconfig(connection.label_id, text=label)
+                if connection.label_id:
+                    coords = self._connection_line_coords(connection)
+                    if coords:
+                        self._update_label(connection, coords)
+            self._toggle_wire_name_mode()
+            return
         if self._mode == "disconnect":
             item = self.canvas.find_withtag("current")
             if not item:
@@ -615,8 +663,7 @@ class DiagramApp:
             port = self._drag_wire["port"]
             if not node or not port:
                 return
-            kind = "out" if mode == "src_port" else "in"
-            self._move_port(node, port, kind, event.y)
+            self._move_port(node, port, event.x, event.y)
             return
 
     def _on_wire_release(self, _event):
@@ -651,20 +698,36 @@ class DiagramApp:
             return False
         return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
 
-    def _move_port(self, node: Node, port: Port, kind: str, target_y: float):
+    def _move_port(self, node: Node, port: Port, target_x: float, target_y: float):
         if port.canvas_id is None:
             return
-        min_y = node.y + 10
-        max_y = node.y + node.height - 10
-        new_y = max(min_y, min(target_y, max_y))
-        new_y = self._snap_value(new_y, min_y)
-        x = node.x if kind == "in" else node.x + node.width
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
         radius = self.PORT_RADIUS
-        self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
-        port.manual_y = new_y
+        if port.side in ("left", "right"):
+            min_y = y1 + radius
+            max_y = y2 - radius
+            new_y = max(min_y, min(target_y, max_y))
+            new_y = self._snap_value(new_y, int(min_y))
+            port.offset = 0 if y2 == y1 else (new_y - y1) / (y2 - y1)
+            port.manual_y = new_y
+            x = x1 if port.side == "left" else x2
+            self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
+        else:
+            min_x = x1 + radius
+            max_x = x2 - radius
+            new_x = max(min_x, min(target_x, max_x))
+            new_x = self._snap_value(new_x, int(min_x))
+            port.offset = 0 if x2 == x1 else (new_x - x1) / (x2 - x1)
+            port.manual_y = None
+            y = y1 if port.side == "top" else y2
+            self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
         self._update_connections()
 
     def _on_port_press(self, event):
+        if self._mode == "delete_port":
+            self._handle_delete_port_click(event)
+            return
         if self._mode != "connect":
             return
         item = self.canvas.find_withtag("current")
@@ -691,16 +754,8 @@ class DiagramApp:
             if not first_port_data:
                 self._reset_connect_mode()
                 return
-            first_node_obj, first_port_obj = first_port_data
-            if first_port_obj.kind == port.kind:
-                self._reset_connect_mode()
-                return
-            if first_port_obj.kind == "out":
-                src = (first_node, first_port)
-                dst = (node_name, port_name)
-            else:
-                src = (node_name, port_name)
-                dst = (first_node, first_port)
+            src = (first_node, first_port)
+            dst = (node_name, port_name)
             connection = Connection(src=src, dst=dst)
             self.connections.append(connection)
             self._draw_connection(connection)
@@ -734,7 +789,7 @@ class DiagramApp:
 
         def _toggle_fields(*_args):
             is_gate = mode_var.get() == "gate"
-            state_block = "disabled" if is_gate else "normal"
+            state_block = "disabled"
             state_gate = "normal" if is_gate else "disabled"
             in_entry.configure(state=state_block)
             out_entry.configure(state=state_block)
@@ -752,6 +807,8 @@ class DiagramApp:
                 gate_def = self._gate_definitions()[gate_kind]
                 inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
                 outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
+                _assign_port_offsets(inputs, "left")
+                _assign_port_offsets(outputs, "right")
                 width = gate_def["width"]
                 height = gate_def["height"]
                 x, y = self._next_block_position()
@@ -767,14 +824,9 @@ class DiagramApp:
                     base_height=height,
                 )
             else:
-                try:
-                    in_count = int(in_entry.get().strip() or "0")
-                    out_count = int(out_entry.get().strip() or "0")
-                except ValueError:
-                    return
-                inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, in_count + 1)]
-                outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, out_count + 1)]
-                base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+                inputs = []
+                outputs = []
+                base_height = 100
                 x, y = self._next_block_position()
                 node = Node(
                     name=name,
@@ -811,9 +863,11 @@ class DiagramApp:
             return
         if self._mode == "disconnect":
             self._toggle_disconnect_mode()
+        if self._mode in ("create_port", "delete_port", "wire_name"):
+            self._reset_port_mode()
         self._mode = "connect"
         self._selected_ports = []
-        self._set_all_port_colors("red")
+        self._set_all_port_colors("yellow")
 
     def _reset_connect_mode(self):
         self._selected_ports = []
@@ -827,6 +881,8 @@ class DiagramApp:
             return
         if self._mode == "connect":
             self._reset_connect_mode()
+        if self._mode in ("create_port", "delete_port", "wire_name"):
+            self._reset_port_mode()
         self._mode = "disconnect"
         self._set_all_wire_colors("red")
 
@@ -856,11 +912,121 @@ class DiagramApp:
             self.canvas.delete(connection.label_id)
         self.connections = [conn for conn in self.connections if conn is not connection]
 
+    def _remove_port(self, node: Node, port: Port):
+        if port.canvas_id:
+            self.canvas.delete(port.canvas_id)
+            self._port_items.pop(port.canvas_id, None)
+        node.inputs = [p for p in node.inputs if p is not port]
+        node.outputs = [p for p in node.outputs if p is not port]
+        to_remove = [conn for conn in self.connections if conn.src == (node.name, port.name) or conn.dst == (node.name, port.name)]
+        for conn in to_remove:
+            self._remove_connection(conn)
+        self._update_connections()
+
     def _toggle_ports(self):
         self._show_ports = not self._show_ports
         for node in self.nodes.values():
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, port.color)
+
+    def _toggle_create_port_mode(self):
+        if self._mode == "create_port":
+            self._reset_port_mode()
+            return
+        if not self._active_node_name:
+            return
+        if self._mode in ("connect", "disconnect", "delete_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "create_port"
+        node = self.nodes.get(self._active_node_name)
+        if node and node.kind == "BLOCK":
+            node.outline_color = "green"
+            self._redraw_node(node)
+        else:
+            self._mode = "normal"
+
+    def _toggle_delete_port_mode(self):
+        if self._mode == "delete_port":
+            self._reset_port_mode()
+            return
+        if not self._active_node_name:
+            return
+        if self._mode in ("connect", "disconnect", "create_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "delete_port"
+        node = self.nodes.get(self._active_node_name)
+        if node and node.kind == "BLOCK":
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, "red")
+        else:
+            self._mode = "normal"
+
+    def _toggle_wire_name_mode(self):
+        if self._mode == "wire_name":
+            self._set_all_wire_colors("#333333")
+            self._mode = "normal"
+            return
+        if self._mode in ("connect", "disconnect", "create_port", "delete_port"):
+            self._reset_port_mode()
+        self._mode = "wire_name"
+        self._set_all_wire_colors("blue")
+
+    def _reset_port_mode(self):
+        if self._mode == "connect":
+            self._reset_connect_mode()
+        if self._mode == "disconnect":
+            self._set_all_wire_colors("#333333")
+        if self._mode == "create_port" and self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                node.outline_color = "#666666"
+                self._redraw_node(node)
+        if self._mode == "delete_port" and self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                for port in node.inputs + node.outputs:
+                    self._set_port_color(port, "black")
+        if self._mode == "wire_name":
+            self._set_all_wire_colors("#333333")
+        self._mode = "normal"
+
+    def _handle_create_port_click(self, event):
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node or node.kind != "BLOCK":
+            return
+        edge = self._edge_for_point(node, event.x, event.y)
+        if not edge:
+            return
+        port_name = f"p{len(node.inputs) + len(node.outputs) + 1}"
+        offset = self._edge_offset(node, edge, event.x, event.y)
+        port = Port(name=port_name, kind="io", side=edge, offset=offset)
+        node.inputs.append(port)
+        node.outline_color = "#666666"
+        self._redraw_node(node)
+        self._mode = "normal"
+
+    def _handle_delete_port_click(self, event):
+        if not self._active_node_name:
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        port_info = self._port_items.get(item[0])
+        if not port_info:
+            return
+        node_name, port_name = port_info
+        if node_name != self._active_node_name:
+            return
+        node = self.nodes.get(node_name)
+        if not node:
+            return
+        port = next((p for p in node.inputs + node.outputs if p.name == port_name), None)
+        if not port:
+            return
+        self._remove_port(node, port)
+        self._reset_port_mode()
 
     def _bring_active_front(self):
         if not self._active_node_name:
@@ -881,6 +1047,10 @@ class DiagramApp:
         return list(self._gate_definitions().keys())
 
     def _gate_definitions(self) -> dict[str, dict[str, int]]:
+        return self._gate_definitions_static()
+
+    @staticmethod
+    def _gate_definitions_static() -> dict[str, dict[str, int]]:
         return {
             "AND2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
             "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
@@ -896,7 +1066,7 @@ class DiagramApp:
     def _draw_gate_shape(self, node: Node, x1: float, y1: float, x2: float, y2: float) -> list[int]:
         kind = node.kind
         items: list[int] = []
-        outline = "#666666"
+        outline = node.outline_color
         fill = "#e0e0e0"
         if kind.startswith("AND"):
             mid_x = (x1 + x2) / 2
@@ -1046,6 +1216,15 @@ def _build_ports(value: str, prefix: str) -> list[str]:
     return [f"{prefix}{idx}" for idx in range(1, count + 1)]
 
 
+def _assign_port_offsets(ports: list[Port], side: str):
+    total = len(ports)
+    if total == 0:
+        return
+    for idx, port in enumerate(ports, start=1):
+        port.side = side
+        port.offset = idx / (total + 1)
+
+
 def parse_blocks(path: Path) -> dict[str, Node]:
     config = configparser.ConfigParser()
     config.read(path)
@@ -1055,11 +1234,15 @@ def parse_blocks(path: Path) -> dict[str, Node]:
         inputs = _build_ports(config.get(section, "in", fallback=""), "in")
         outputs = _build_ports(config.get(section, "out", fallback=""), "out")
         base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+        input_ports = [Port(name=p, kind="in") for p in inputs]
+        output_ports = [Port(name=p, kind="out") for p in outputs]
+        _assign_port_offsets(input_ports, "left")
+        _assign_port_offsets(output_ports, "right")
         node = Node(
             name=section,
             kind="BLOCK",
-            inputs=[Port(name=p, kind="in") for p in inputs],
-            outputs=[Port(name=p, kind="out") for p in outputs],
+            inputs=input_ports,
+            outputs=output_ports,
             x=x,
             y=y,
             width=160,
@@ -1093,11 +1276,17 @@ def parse_connections(
             gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
             inputs = [item.strip() for item in inputs_raw.split(",") if item.strip()]
             output = output_raw.strip()
+            gate_def = DiagramApp._gate_definitions_static()
+            outputs_count = gate_def[gate_type]["outputs"]
+            input_ports = [Port(name=f"in{idx+1}", kind="in") for idx in range(len(inputs))]
+            output_ports = [Port(name=f"out{idx+1}", kind="out") for idx in range(outputs_count)]
+            _assign_port_offsets(input_ports, "left")
+            _assign_port_offsets(output_ports, "right")
             gate_node = Node(
                 name=gate_name,
                 kind=gate_type,
-                inputs=[Port(name=f"in{idx+1}", kind="in") for idx in range(len(inputs))],
-                outputs=[Port(name="out", kind="out")],
+                inputs=input_ports,
+                outputs=output_ports,
                 x=400 + gate_index * 40,
                 y=120 + gate_index * 40,
                 width=60,
