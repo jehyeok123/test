@@ -167,7 +167,7 @@ class DiagramApp:
                 label_x,
                 label_y,
                 text=connection.label,
-                font=("Arial", 6),
+                font=("Arial", 12),
                 anchor="s",
             )
             connection.label_id = label_id
@@ -437,6 +437,18 @@ class DiagramApp:
         self.canvas.addtag_withtag("port", port.canvas_id)
         self.canvas.addtag_withtag(f"port:{node_name}:{port.name}", port.canvas_id)
 
+    def _port_side(self, port_info: tuple[str, str] | None) -> str | None:
+        if not port_info:
+            return None
+        node_name, port_name = port_info
+        node = self.nodes.get(node_name)
+        if not node:
+            return None
+        port = next((p for p in node.inputs + node.outputs if p.name == port_name), None)
+        if not port:
+            return None
+        return port.side
+
     def _update_connections(self):
         for connection in self.connections:
             if not connection.line_id:
@@ -455,13 +467,30 @@ class DiagramApp:
         start: tuple[float, float],
         end: tuple[float, float],
         manual_mid_x: float | None = None,
+        lock_mid_x: float | None = None,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
         if x1 == x2 or y1 == y2:
             return [x1, y1, x2, y2]
-        mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
+        if lock_mid_x is not None:
+            mid_x = lock_mid_x
+        else:
+            mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+
+    def _connection_manual_locked(self, connection: Connection) -> bool:
+        if not connection.src or not connection.dst:
+            return False
+        src_node, src_port = connection.src
+        dst_node, dst_port = connection.dst
+        src_side = self._port_side((src_node, src_port))
+        dst_side = self._port_side((dst_node, dst_port))
+        if not src_side or not dst_side:
+            return False
+        return (src_side in ("top", "bottom") and dst_side in ("left", "right")) or (
+            src_side in ("left", "right") and dst_side in ("top", "bottom")
+        )
 
     def _connection_line_coords(self, connection: Connection) -> list[float] | None:
         if connection.src and connection.dst:
@@ -473,7 +502,22 @@ class DiagramApp:
                 return None
             x1, y1 = self._port_center(src_port_id)
             x2, y2 = self._port_center(dst_port_id)
-            return self._connection_coords((x1, y1), (x2, y2), connection.manual_mid_x)
+            src_info = self._port_items.get(src_port_id)
+            dst_info = self._port_items.get(dst_port_id)
+            src_side = self._port_side(src_info) if src_info else None
+            dst_side = self._port_side(dst_info) if dst_info else None
+            lock_mid_x = None
+            if src_side and dst_side and self._connection_manual_locked(connection):
+                if src_side in ("top", "bottom"):
+                    lock_mid_x = x1
+                elif src_side in ("left", "right"):
+                    lock_mid_x = x2
+            return self._connection_coords(
+                (x1, y1),
+                (x2, y2),
+                connection.manual_mid_x,
+                lock_mid_x=lock_mid_x,
+            )
         if connection.dst:
             dst_node, dst_port = connection.dst
             dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
@@ -534,7 +578,7 @@ class DiagramApp:
                             label_x,
                             label_y,
                             text=label,
-                            font=("Arial", 6),
+                            font=("Arial", 12),
                             anchor="s",
                         )
                 else:
@@ -639,6 +683,8 @@ class DiagramApp:
             return
         mode = self._drag_wire["mode"]
         if mode == "mid":
+            if self._connection_manual_locked(connection):
+                return
             raw_mid = event.x - self._drag_wire["offset"]
             connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
             if not connection.src or not connection.dst:
@@ -941,6 +987,7 @@ class DiagramApp:
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
             node.outline_color = "green"
+            node.resize_enabled = True
             self._redraw_node(node)
         else:
             self._mode = "normal"
@@ -956,6 +1003,7 @@ class DiagramApp:
         self._mode = "delete_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
+            node.resize_enabled = True
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, "red")
         else:
@@ -980,12 +1028,15 @@ class DiagramApp:
             node = self.nodes.get(self._active_node_name)
             if node:
                 node.outline_color = "#666666"
+                node.resize_enabled = False
                 self._redraw_node(node)
         if self._mode == "delete_port" and self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node:
                 for port in node.inputs + node.outputs:
                     self._set_port_color(port, "black")
+                node.resize_enabled = False
+                self._redraw_node(node)
         if self._mode == "wire_name":
             self._set_all_wire_colors("#333333")
         self._mode = "normal"
