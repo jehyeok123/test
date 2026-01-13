@@ -1195,6 +1195,7 @@ class DiagramApp:
         if not image_path.exists():
             return None
         image = tk.PhotoImage(file=str(image_path))
+        image = image.subsample(10, 10)
         self._gate_images[gate_kind] = image
         return image
 
