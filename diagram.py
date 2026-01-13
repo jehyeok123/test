@@ -33,6 +33,8 @@ class Node:
     items: list[int] = field(default_factory=list)
     resize_enabled: bool = False
     outline_color: str = "#666666"
+    image: tk.PhotoImage | None = None
+    image_id: int | None = None
 
 
 @dataclass
@@ -41,6 +43,7 @@ class Connection:
     dst: tuple[str, str] | None
     line_id: int | None = None
     manual_mid_x: float | None = None
+    manual_mid_y: float | None = None
     label: str | None = None
     label_id: int | None = None
 
@@ -91,6 +94,7 @@ class DiagramApp:
         self._port_items: dict[int, tuple[str, str]] = {}
         self._selected_ports: list[tuple[str, str]] = []
         self._active_node_name: str | None = None
+        self._gate_images: dict[str, tk.PhotoImage] = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -113,7 +117,17 @@ class DiagramApp:
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         if node.kind != "BLOCK":
-            node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
+            image = self._load_gate_image(node.kind)
+            if image:
+                node.image = image
+                node.width = image.width()
+                node.height = image.height()
+                node.base_height = node.height
+                x2, y2 = node.x + node.width, node.y + node.height
+                node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
+                node.items.append(node.image_id)
+            else:
+                node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
         else:
             outline_width = 4 if node.resize_enabled else 2
             rect = self.canvas.create_rectangle(
@@ -462,35 +476,61 @@ class DiagramApp:
             )
             self._update_label(connection, coords)
 
-    def _connection_coords(
+    def _connection_coords_horizontal(
         self,
         start: tuple[float, float],
         end: tuple[float, float],
         manual_mid_x: float | None = None,
-        lock_mid_x: float | None = None,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
         if x1 == x2 or y1 == y2:
             return [x1, y1, x2, y2]
-        if lock_mid_x is not None:
-            mid_x = lock_mid_x
-        else:
-            mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
+        mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
         return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
 
-    def _connection_manual_locked(self, connection: Connection) -> bool:
+    def _connection_coords_vertical(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        manual_mid_y: float | None = None,
+    ) -> list[float]:
+        x1, y1 = start
+        x2, y2 = end
+        if x1 == x2 or y1 == y2:
+            return [x1, y1, x2, y2]
+        mid_y = manual_mid_y if manual_mid_y is not None else (y1 + y2) / 2
+        return [x1, y1, x1, mid_y, x2, mid_y, x2, y2]
+
+    @staticmethod
+    def _connection_coords_orthogonal(
+        start: tuple[float, float],
+        end: tuple[float, float],
+        prefer_vertical_end: bool,
+    ) -> list[float]:
+        x1, y1 = start
+        x2, y2 = end
+        if prefer_vertical_end:
+            return [x1, y1, x2, y1, x2, y2]
+        return [x1, y1, x1, y2, x2, y2]
+
+    def _connection_orientation(self, connection: Connection) -> str | None:
         if not connection.src or not connection.dst:
-            return False
+            return None
         src_node, src_port = connection.src
         dst_node, dst_port = connection.dst
         src_side = self._port_side((src_node, src_port))
         dst_side = self._port_side((dst_node, dst_port))
         if not src_side or not dst_side:
-            return False
-        return (src_side in ("top", "bottom") and dst_side in ("left", "right")) or (
-            src_side in ("left", "right") and dst_side in ("top", "bottom")
-        )
+            return None
+        if src_side in ("left", "right") and dst_side in ("left", "right"):
+            return "horizontal"
+        if src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
+            return "vertical"
+        return "orthogonal"
+
+    def _connection_manual_locked(self, connection: Connection) -> bool:
+        return self._connection_orientation(connection) == "orthogonal"
 
     def _connection_line_coords(self, connection: Connection) -> list[float] | None:
         if connection.src and connection.dst:
@@ -502,22 +542,16 @@ class DiagramApp:
                 return None
             x1, y1 = self._port_center(src_port_id)
             x2, y2 = self._port_center(dst_port_id)
-            src_info = self._port_items.get(src_port_id)
-            dst_info = self._port_items.get(dst_port_id)
-            src_side = self._port_side(src_info) if src_info else None
-            dst_side = self._port_side(dst_info) if dst_info else None
-            lock_mid_x = None
-            if src_side and dst_side and self._connection_manual_locked(connection):
-                if src_side in ("top", "bottom"):
-                    lock_mid_x = x1
-                elif src_side in ("left", "right"):
-                    lock_mid_x = x2
-            return self._connection_coords(
-                (x1, y1),
-                (x2, y2),
-                connection.manual_mid_x,
-                lock_mid_x=lock_mid_x,
-            )
+            orientation = self._connection_orientation(connection)
+            if orientation == "horizontal":
+                return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+            if orientation == "vertical":
+                return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
+            if orientation == "orthogonal":
+                dst_side = self._port_side((dst_node, dst_port))
+                prefer_vertical_end = dst_side in ("top", "bottom") if dst_side else False
+                return self._connection_coords_orthogonal((x1, y1), (x2, y2), prefer_vertical_end)
+            return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
         if connection.dst:
             dst_node, dst_port = connection.dst
             dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
@@ -612,7 +646,7 @@ class DiagramApp:
         coords = self._connection_line_coords(connection)
         if not coords:
             return
-        if len(coords) < 8:
+        if len(coords) == 4:
             if not self._near_horizontal_segment(event.x, event.y, coords[0], coords[2], coords[1]):
                 return
             if connection.dst:
@@ -636,6 +670,47 @@ class DiagramApp:
                     return
                 self._drag_wire["connection"] = connection
                 self._drag_wire["mode"] = "src_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            return
+        orientation = self._connection_orientation(connection)
+        if orientation == "orthogonal":
+            return
+        if orientation == "vertical":
+            mid_y = coords[3]
+            x1 = coords[2]
+            x2 = coords[4]
+            if self._near_horizontal_segment(event.x, event.y, x1, x2, mid_y):
+                self._drag_wire["connection"] = connection
+                self._drag_wire["offset"] = event.y - mid_y
+                self._drag_wire["mode"] = "mid_y"
+                return
+            if self._near_vertical_segment(event.x, event.y, coords[0], coords[1], mid_y):
+                if not connection.src:
+                    return
+                port_info = self._find_port(connection.src[0], connection.src[1], "out")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "src_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            if self._near_vertical_segment(event.x, event.y, coords[6], mid_y, coords[7]):
+                if not connection.dst:
+                    return
+                port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "dst_port"
                 self._drag_wire["node"] = node
                 self._drag_wire["port"] = port
                 return
@@ -695,11 +770,23 @@ class DiagramApp:
                 return
             x1, y1 = self._port_center(src_id)
             x2, y2 = self._port_center(dst_id)
-            coords = self._connection_coords(
-                (x1, y1),
-                (x2, y2),
-                connection.manual_mid_x,
-            )
+            coords = self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+            self.canvas.coords(connection.line_id, *coords)
+            return
+        if mode == "mid_y":
+            if self._connection_manual_locked(connection):
+                return
+            raw_mid = event.y - self._drag_wire["offset"]
+            connection.manual_mid_y = self._snap_to_step(raw_mid, self.MID_STEP)
+            if not connection.src or not connection.dst:
+                return
+            src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+            dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+            if not src_id or not dst_id:
+                return
+            x1, y1 = self._port_center(src_id)
+            x2, y2 = self._port_center(dst_id)
+            coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             self.canvas.coords(connection.line_id, *coords)
             return
         if mode in ("src_port", "dst_port"):
@@ -1055,6 +1142,7 @@ class DiagramApp:
         port = Port(name=port_name, kind="io", side=edge, offset=offset)
         node.inputs.append(port)
         node.outline_color = "#666666"
+        node.resize_enabled = False
         self._redraw_node(node)
         self._mode = "normal"
 
@@ -1099,6 +1187,16 @@ class DiagramApp:
 
     def _gate_definitions(self) -> dict[str, dict[str, int]]:
         return self._gate_definitions_static()
+
+    def _load_gate_image(self, gate_kind: str) -> tk.PhotoImage | None:
+        if gate_kind in self._gate_images:
+            return self._gate_images[gate_kind]
+        image_path = Path(__file__).resolve().parent / "gate_image" / f"{gate_kind}.png"
+        if not image_path.exists():
+            return None
+        image = tk.PhotoImage(file=str(image_path))
+        self._gate_images[gate_kind] = image
+        return image
 
     @staticmethod
     def _gate_definitions_static() -> dict[str, dict[str, int]]:
