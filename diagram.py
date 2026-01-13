@@ -909,34 +909,33 @@ class DiagramApp:
         tk.Label(window, text="Name").grid(row=1, column=0, padx=6, pady=6, sticky="w")
         name_entry = tk.Entry(window)
         name_entry.grid(row=1, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(window, text="Inputs").grid(row=2, column=0, padx=6, pady=6, sticky="w")
-        in_entry = tk.Entry(window)
-        in_entry.grid(row=2, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(window, text="Outputs").grid(row=3, column=0, padx=6, pady=6, sticky="w")
-        out_entry = tk.Entry(window)
-        out_entry.grid(row=3, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(window, text="Gate Type").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Gate Type").grid(row=2, column=0, padx=6, pady=6, sticky="w")
         gate_var = tk.StringVar(value="AND2")
         gate_menu = tk.OptionMenu(window, gate_var, *self._gate_types())
-        gate_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
+        gate_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
 
         def _toggle_fields(*_args):
             is_gate = mode_var.get() == "gate"
-            state_block = "disabled"
+            state_name = "disabled" if is_gate else "normal"
             state_gate = "normal" if is_gate else "disabled"
-            in_entry.configure(state=state_block)
-            out_entry.configure(state=state_block)
+            name_entry.configure(state=state_name)
             gate_menu.configure(state=state_gate)
 
         mode_var.trace_add("write", _toggle_fields)
         _toggle_fields()
 
+        def _unique_gate_name(kind: str) -> str:
+            index = 1
+            while True:
+                candidate = f"{kind}{index}"
+                if candidate not in self.nodes:
+                    return candidate
+                index += 1
+
         def _create_block():
-            name = name_entry.get().strip()
-            if not name or name in self.nodes:
-                return
             if mode_var.get() == "gate":
                 gate_kind = gate_var.get()
+                name = _unique_gate_name(gate_kind)
                 gate_def = self._gate_definitions()[gate_kind]
                 inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
                 outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
@@ -957,6 +956,9 @@ class DiagramApp:
                     base_height=height,
                 )
             else:
+                name = name_entry.get().strip()
+                if not name or name in self.nodes:
+                    return
                 inputs = []
                 outputs = []
                 base_height = 100
@@ -977,7 +979,7 @@ class DiagramApp:
             self._raise_node_and_wires(node.name)
             window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=5, column=0, columnspan=3, pady=8)
+        tk.Button(window, text="Create", command=_create_block).grid(row=3, column=0, columnspan=3, pady=8)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
