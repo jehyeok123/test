@@ -1205,11 +1205,14 @@ class DiagramApp:
             "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
             "OR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
             "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "XOR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "XOR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
             "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
             "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
             "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 40},
             "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 40},
             "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 40},
         }
 
     def _draw_gate_shape(self, node: Node, x1: float, y1: float, x2: float, y2: float) -> list[int]:
@@ -1418,7 +1421,7 @@ def parse_connections(
             continue
         line, label = _split_label(line)
         gate_match = re.match(
-            r"^(AND2|AND4|OR2|OR4|MUX_2x1|MUX_4x1|DEMUX_1x2|DEMUX_1x4|DFF)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$",
+            r"^(AND2|AND4|OR2|OR4|XOR2|XOR4|INV|MUX_2x1|MUX_4x1|DEMUX_1x2|DEMUX_1x4|DFF)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$",
             line,
         )
         if gate_match:
