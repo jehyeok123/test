@@ -1,0 +1,1540 @@
+import configparser
+import re
+import sys
+import tkinter as tk
+from tkinter import simpledialog
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class Port:
+    name: str
+    kind: str
+    canvas_id: int | None = None
+    connected: bool = True
+    manual_y: float | None = None
+    color: str = "black"
+    side: str = "left"
+    offset: float = 0.5
+
+
+@dataclass
+class Node:
+    name: str
+    kind: str
+    inputs: list[Port]
+    outputs: list[Port]
+    x: int
+    y: int
+    width: int = 160
+    height: int = 100
+    base_height: int = 100
+    items: list[int] = field(default_factory=list)
+    resize_enabled: bool = False
+    outline_color: str = "#666666"
+    image: tk.PhotoImage | None = None
+    image_id: int | None = None
+
+
+@dataclass
+class Connection:
+    src: tuple[str, str] | None
+    dst: tuple[str, str] | None
+    line_id: int | None = None
+    manual_mid_x: float | None = None
+    manual_mid_y: float | None = None
+    label: str | None = None
+    label_id: int | None = None
+
+
+class DiagramApp:
+    GRID_STEP = 10
+    MID_STEP = 5
+    PORT_RADIUS = 5
+
+    def __init__(
+        self,
+        nodes: dict[str, Node],
+        connections: list[Connection],
+        output_path: Path,
+    ):
+        self.nodes = nodes
+        self.connections = connections
+        self.output_path = output_path
+        self.root = tk.Tk()
+        self.root.title("Block Diagram")
+        self.toolbar = tk.Frame(self.root)
+        self.toolbar.pack(fill=tk.X)
+        self.new_button = tk.Button(self.toolbar, text="NEW", command=self._open_new_block)
+        self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
+        self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
+        self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.create_port_button = tk.Button(self.toolbar, text="CREATE PORT", command=self._toggle_create_port_mode)
+        self.create_port_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.delete_port_button = tk.Button(self.toolbar, text="DELETE PORT", command=self._toggle_delete_port_mode)
+        self.delete_port_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.port_toggle_button = tk.Button(self.toolbar, text="SHOW/HIDE PORT", command=self._toggle_ports)
+        self.port_toggle_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.wire_name_button = tk.Button(self.toolbar, text="WIRE NAME", command=self._toggle_wire_name_mode)
+        self.wire_name_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.bring_front_button = tk.Button(self.toolbar, text="BRING FRONT", command=self._bring_active_front)
+        self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
+        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self._drag_data = {"node": None, "x": 0, "y": 0}
+        self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
+        self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
+        self._mode = "normal"
+        self._show_ports = True
+        self._port_items: dict[int, tuple[str, str]] = {}
+        self._selected_ports: list[tuple[str, str]] = []
+        self._active_node_name: str | None = None
+        self._gate_images: dict[str, tk.PhotoImage] = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        for node in self.nodes.values():
+            self._draw_node(node)
+        for connection in self.connections:
+            self._draw_connection(connection)
+        self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
+        self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
+        self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
+        self.canvas.tag_bind("node", "<Double-Button-1>", self._on_toggle_resize)
+        self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
+        self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
+        self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
+        self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
+        self.root.bind("s", lambda _event: self.save_diagram(self.output_path))
+        self.root.after(300, lambda: self.save_diagram(self.output_path))
+
+    def _draw_node(self, node: Node):
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        if node.kind != "BLOCK":
+            image = self._load_gate_image(node.kind)
+            if image:
+                node.image = image
+                node.width = image.width()
+                node.height = image.height()
+                node.base_height = node.height
+                x2, y2 = node.x + node.width, node.y + node.height
+                node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
+                node.items.append(node.image_id)
+            else:
+                node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
+        else:
+            outline_width = 4 if node.resize_enabled else 2
+            rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                x2,
+                y2,
+                fill="#e0e0e0",
+                outline=node.outline_color,
+                width=outline_width,
+            )
+            node.items.append(rect)
+        if node.kind == "BLOCK":
+            label = self.canvas.create_text(
+                x1 + 6,
+                y1 + 6,
+                text=node.name,
+                font=("Arial", 12, "bold"),
+                anchor="nw",
+            )
+            node.items.append(label)
+
+        ports = node.inputs + node.outputs
+        for port in ports:
+            px, py = self._port_position(node, port)
+            port_id = self._create_port_oval(px, py, port.color)
+            port.canvas_id = port_id
+            node.items.append(port_id)
+            self._register_port(node.name, port)
+
+        for item in node.items:
+            self.canvas.addtag_withtag("node", item)
+            self.canvas.addtag_withtag(f"node:{node.name}", item)
+
+    def _draw_connection(self, connection: Connection):
+        coords = self._connection_line_coords(connection)
+        if not coords:
+            return
+        line = self.canvas.create_line(
+            *coords,
+            smooth=False,
+            arrow=tk.LAST,
+            width=2,
+            fill="#333333",
+        )
+        self.canvas.addtag_withtag("wire", line)
+        connection.line_id = line
+        if connection.label:
+            label_x, label_y = self._label_position(coords)
+            label_id = self.canvas.create_text(
+                label_x,
+                label_y,
+                text=connection.label,
+                font=("Arial", 12),
+                anchor="s",
+            )
+            connection.label_id = label_id
+
+    def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str | None = None) -> int | None:
+        node = self.nodes.get(node_name)
+        if not node:
+            return None
+        for port in node.inputs + node.outputs:
+            if port.name == port_name:
+                return port.canvas_id
+        return None
+
+    def _port_center(self, canvas_id: int) -> tuple[float, float]:
+        x1, y1, x2, y2 = self.canvas.coords(canvas_id)
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+    def _on_press(self, event):
+        if self._mode == "create_port":
+            self._handle_create_port_click(event)
+            return
+        if self._mode != "normal":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        tags = self.canvas.gettags(item[0])
+        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
+        if not node_tag:
+            return
+        node_name = node_tag.split(":", 1)[1]
+        node = self.nodes[node_name]
+        self._active_node_name = node.name
+        self._raise_node_and_wires(node.name)
+        if node.resize_enabled:
+            resize_mode = self._hit_test_edge(node, event.x, event.y)
+            if resize_mode:
+                self._resize_data["node"] = node
+                self._resize_data["mode"] = resize_mode
+                self._resize_data["x"] = event.x
+                self._resize_data["y"] = event.y
+                self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+                self.canvas.bind("<B1-Motion>", self._on_resize_motion)
+                self.canvas.bind("<ButtonRelease-1>", self._on_resize_release)
+            return
+        resize_mode = self._hit_test_edge(node, event.x, event.y)
+        if resize_mode:
+            self._resize_data["node"] = node
+            self._resize_data["mode"] = resize_mode
+            self._resize_data["x"] = event.x
+            self._resize_data["y"] = event.y
+            self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+            return
+        self._drag_data["node"] = node
+        self._drag_data["x"] = event.x
+        self._drag_data["y"] = event.y
+
+    def _on_release(self, _event):
+        self._drag_data["node"] = None
+        self._resize_data["node"] = None
+        self._resize_data["mode"] = None
+        self._resize_data["orig"] = None
+
+    def _on_motion(self, event):
+        if self._mode != "normal":
+            return
+        if self._resize_data["node"] is not None:
+            self._on_resize_motion(event)
+            return
+        node = self._drag_data["node"]
+        if not node:
+            return
+        dx = event.x - self._drag_data["x"]
+        dy = event.y - self._drag_data["y"]
+        target_x = node.x + dx
+        target_y = node.y + dy
+        snapped_x = self._snap_value(target_x)
+        snapped_y = self._snap_value(target_y)
+        dx = snapped_x - node.x
+        dy = snapped_y - node.y
+        if dx == 0 and dy == 0:
+            return
+        self._drag_data["x"] = event.x
+        self._drag_data["y"] = event.y
+        self.canvas.move(f"node:{node.name}", dx, dy)
+        node.x += dx
+        node.y += dy
+        self._update_connections()
+
+    def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
+        if node.kind != "BLOCK" or not node.resize_enabled:
+            return None
+        left = node.x
+        right = node.x + node.width
+        top = node.y
+        bottom = node.y + node.height
+        if left - threshold <= x <= right + threshold and abs(y - top) <= threshold:
+            return "top"
+        if left - threshold <= x <= right + threshold and abs(y - bottom) <= threshold:
+            return "bottom"
+        if top - threshold <= y <= bottom + threshold and abs(x - left) <= threshold:
+            return "left"
+        if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
+            return "right"
+        return None
+
+    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
+        left = node.x
+        right = node.x + node.width
+        top = node.y
+        bottom = node.y + node.height
+        if left - threshold <= x <= right + threshold and abs(y - top) <= threshold:
+            return "top"
+        if left - threshold <= x <= right + threshold and abs(y - bottom) <= threshold:
+            return "bottom"
+        if top - threshold <= y <= bottom + threshold and abs(x - left) <= threshold:
+            return "left"
+        if top - threshold <= y <= bottom + threshold and abs(x - right) <= threshold:
+            return "right"
+        return None
+
+    def _edge_offset(self, node: Node, side: str, x: float, y: float) -> float:
+        if side in ("left", "right"):
+            if node.height == 0:
+                return 0.5
+            return max(0.0, min(1.0, (y - node.y) / node.height))
+        if node.width == 0:
+            return 0.5
+        return max(0.0, min(1.0, (x - node.x) / node.width))
+
+    def _on_toggle_resize(self, event):
+        if self._mode != "normal":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        tags = self.canvas.gettags(item[0])
+        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
+        if not node_tag:
+            return
+        node_name = node_tag.split(":", 1)[1]
+        node = self.nodes[node_name]
+        self._active_node_name = node.name
+        if node.kind != "BLOCK":
+            return
+        node.resize_enabled = not node.resize_enabled
+        self._redraw_node(node)
+        self._update_connections()
+
+    def _on_resize_motion(self, event):
+        node = self._resize_data["node"]
+        mode = self._resize_data["mode"]
+        orig = self._resize_data["orig"]
+        if not node or not mode or not orig:
+            return
+        orig_x, orig_y, orig_width, orig_height = orig
+        dx = event.x - self._resize_data["x"]
+        dy = event.y - self._resize_data["y"]
+        min_width = 80
+        min_height = 60
+        old_port_positions = []
+        for port in node.inputs + node.outputs:
+            if port.canvas_id:
+                old_port_positions.append((port, self._port_center(port.canvas_id)))
+        if mode == "left":
+            new_width = max(min_width, orig_width - dx)
+            new_width = self._snap_value(new_width, min_width)
+            node.x = orig_x + (orig_width - new_width)
+            node.width = new_width
+        elif mode == "right":
+            node.width = self._snap_value(max(min_width, orig_width + dx), min_width)
+        elif mode == "top":
+            new_height = max(min_height, orig_height - dy)
+            new_height = self._snap_value(new_height, min_height)
+            node.y = orig_y + (orig_height - new_height)
+            node.height = new_height
+            for port, prev in old_port_positions:
+                port.manual_y = prev[1]
+        elif mode == "bottom":
+            node.height = self._snap_value(max(min_height, orig_height + dy), min_height)
+        self._redraw_node(node)
+        self._update_connections()
+
+    def _on_resize_release(self, _event):
+        self._resize_data["node"] = None
+        self._resize_data["mode"] = None
+        self._resize_data["orig"] = None
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+
+    def _redraw_node(self, node: Node):
+        for item in node.items:
+            self.canvas.delete(item)
+        node.items.clear()
+        self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
+        self._draw_node(node)
+        self._raise_node_and_wires(node.name)
+
+    def _snap_value(self, value: float, min_value: int | None = None) -> int:
+        snapped = int(round(value / self.GRID_STEP) * self.GRID_STEP)
+        if min_value is not None:
+            return max(min_value, snapped)
+        return snapped
+
+    @staticmethod
+    def _snap_to_step(value: float, step: int) -> float:
+        return round(value / step) * step
+
+    def _raise_node_and_wires(self, node_name: str):
+        self.canvas.tag_raise(f"node:{node_name}")
+        for connection in self.connections:
+            if connection.src and connection.src[0] == node_name:
+                self._raise_connection(connection)
+            if connection.dst and connection.dst[0] == node_name:
+                self._raise_connection(connection)
+
+    def _raise_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.tag_raise(connection.line_id)
+        if connection.label_id:
+            self.canvas.tag_raise(connection.label_id)
+
+    def _lower_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.tag_lower(connection.line_id)
+        if connection.label_id:
+            self.canvas.tag_lower(connection.label_id)
+
+    def _create_port_oval(self, x: float, y: float, color: str) -> int:
+        radius = self.PORT_RADIUS
+        hidden = not self._show_ports and color == "black"
+        fill = "" if hidden else color
+        outline = "" if hidden else color
+        width = 0 if hidden else 1
+        return self.canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            fill=fill,
+            outline=outline,
+            width=width,
+        )
+
+    def _port_position(self, node: Node, port: Port) -> tuple[float, float]:
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        if port.side == "left":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x1, py)
+        if port.side == "right":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x2, py)
+        if port.side == "top":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y1)
+        if port.side == "bottom":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y2)
+        py = port.manual_y if port.manual_y is not None else (y1 + y2) / 2
+        return (x1, py)
+
+    def _register_port(self, node_name: str, port: Port):
+        if port.canvas_id is None:
+            return
+        self._port_items[port.canvas_id] = (node_name, port.name)
+        self.canvas.addtag_withtag("port", port.canvas_id)
+        self.canvas.addtag_withtag(f"port:{node_name}:{port.name}", port.canvas_id)
+
+    def _port_side(self, port_info: tuple[str, str] | None) -> str | None:
+        if not port_info:
+            return None
+        node_name, port_name = port_info
+        node = self.nodes.get(node_name)
+        if not node:
+            return None
+        port = next((p for p in node.inputs + node.outputs if p.name == port_name), None)
+        if not port:
+            return None
+        return port.side
+
+    def _update_connections(self):
+        for connection in self.connections:
+            if not connection.line_id:
+                continue
+            coords = self._connection_line_coords(connection)
+            if not coords:
+                continue
+            self.canvas.coords(
+                connection.line_id,
+                *coords,
+            )
+            self._update_label(connection, coords)
+
+    def _connection_coords_horizontal(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        manual_mid_x: float | None = None,
+    ) -> list[float]:
+        x1, y1 = start
+        x2, y2 = end
+        if x1 == x2 or y1 == y2:
+            return [x1, y1, x2, y2]
+        mid_x = manual_mid_x if manual_mid_x is not None else (x1 + x2) / 2
+        return [x1, y1, mid_x, y1, mid_x, y2, x2, y2]
+
+    def _connection_coords_vertical(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        manual_mid_y: float | None = None,
+    ) -> list[float]:
+        x1, y1 = start
+        x2, y2 = end
+        if x1 == x2 or y1 == y2:
+            return [x1, y1, x2, y2]
+        mid_y = manual_mid_y if manual_mid_y is not None else (y1 + y2) / 2
+        return [x1, y1, x1, mid_y, x2, mid_y, x2, y2]
+
+    @staticmethod
+    def _connection_coords_orthogonal(
+        start: tuple[float, float],
+        end: tuple[float, float],
+        prefer_vertical_end: bool,
+    ) -> list[float]:
+        x1, y1 = start
+        x2, y2 = end
+        if prefer_vertical_end:
+            return [x1, y1, x2, y1, x2, y2]
+        return [x1, y1, x1, y2, x2, y2]
+
+    def _connection_orientation(self, connection: Connection) -> str | None:
+        if not connection.src or not connection.dst:
+            return None
+        src_node, src_port = connection.src
+        dst_node, dst_port = connection.dst
+        src_side = self._port_side((src_node, src_port))
+        dst_side = self._port_side((dst_node, dst_port))
+        if not src_side or not dst_side:
+            return None
+        if src_side in ("left", "right") and dst_side in ("left", "right"):
+            return "horizontal"
+        if src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
+            return "vertical"
+        return "orthogonal"
+
+    def _connection_manual_locked(self, connection: Connection) -> bool:
+        return self._connection_orientation(connection) == "orthogonal"
+
+    def _connection_line_coords(self, connection: Connection) -> list[float] | None:
+        if connection.src and connection.dst:
+            src_node, src_port = connection.src
+            dst_node, dst_port = connection.dst
+            src_port_id = self._get_port_canvas_id(src_node, src_port, "out")
+            dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
+            if not src_port_id or not dst_port_id:
+                return None
+            x1, y1 = self._port_center(src_port_id)
+            x2, y2 = self._port_center(dst_port_id)
+            orientation = self._connection_orientation(connection)
+            if orientation == "horizontal":
+                return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+            if orientation == "vertical":
+                return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
+            if orientation == "orthogonal":
+                dst_side = self._port_side((dst_node, dst_port))
+                prefer_vertical_end = dst_side in ("top", "bottom") if dst_side else False
+                return self._connection_coords_orthogonal((x1, y1), (x2, y2), prefer_vertical_end)
+            return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+        if connection.dst:
+            dst_node, dst_port = connection.dst
+            dst_port_id = self._get_port_canvas_id(dst_node, dst_port, "in")
+            if not dst_port_id:
+                return None
+            x2, y2 = self._port_center(dst_port_id)
+            return [x2 - 50, y2, x2, y2]
+        if connection.src:
+            src_node, src_port = connection.src
+            src_port_id = self._get_port_canvas_id(src_node, src_port, "out")
+            if not src_port_id:
+                return None
+            x1, y1 = self._port_center(src_port_id)
+            return [x1, y1, x1 + 50, y1]
+        return None
+
+    def _label_position(self, coords: list[float]) -> tuple[float, float]:
+        if len(coords) >= 8:
+            x1, y1, x2 = coords[0], coords[1], coords[2]
+            return ((x1 + x2) / 2, y1 - 4)
+        x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
+        mid_x = (x1 + x2) / 2
+        top_y = min(y1, y2) - 4
+        return (mid_x, top_y)
+
+    def _update_label(self, connection: Connection, coords: list[float]):
+        if not connection.label_id:
+            return
+        label_x, label_y = self._label_position(coords)
+        self.canvas.coords(connection.label_id, label_x, label_y)
+
+    def _find_port(self, node_name: str, port_name: str, kind: str | None = None) -> tuple[Node, Port] | None:
+        node = self.nodes.get(node_name)
+        if not node:
+            return None
+        for port in node.inputs + node.outputs:
+            if port.name == port_name:
+                return node, port
+        return None
+
+    def _on_wire_press(self, event):
+        if self._mode == "wire_name":
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            line_id = item[0]
+            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+            if not connection:
+                return
+            label = simpledialog.askstring("WIRE NAME", "Wire name:")
+            if label is not None:
+                connection.label = label
+                if connection.label_id is None:
+                    coords = self._connection_line_coords(connection)
+                    if coords:
+                        label_x, label_y = self._label_position(coords)
+                        connection.label_id = self.canvas.create_text(
+                            label_x,
+                            label_y,
+                            text=label,
+                            font=("Arial", 12),
+                            anchor="s",
+                        )
+                else:
+                    self.canvas.itemconfig(connection.label_id, text=label)
+                if connection.label_id:
+                    coords = self._connection_line_coords(connection)
+                    if coords:
+                        self._update_label(connection, coords)
+            self._toggle_wire_name_mode()
+            return
+        if self._mode == "disconnect":
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            line_id = item[0]
+            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+            if not connection:
+                return
+            self._remove_connection(connection)
+            self._toggle_disconnect_mode()
+            return
+        if self._mode != "normal":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        line_id = item[0]
+        connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
+        if not connection:
+            return
+        coords = self._connection_line_coords(connection)
+        if not coords:
+            return
+        if len(coords) == 4:
+            if not self._near_horizontal_segment(event.x, event.y, coords[0], coords[2], coords[1]):
+                return
+            if connection.dst:
+                port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "dst_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            if connection.src:
+                port_info = self._find_port(connection.src[0], connection.src[1], "out")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "src_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            return
+        orientation = self._connection_orientation(connection)
+        if orientation == "orthogonal":
+            return
+        if orientation == "vertical":
+            mid_y = coords[3]
+            x1 = coords[2]
+            x2 = coords[4]
+            if self._near_horizontal_segment(event.x, event.y, x1, x2, mid_y):
+                self._drag_wire["connection"] = connection
+                self._drag_wire["offset"] = event.y - mid_y
+                self._drag_wire["mode"] = "mid_y"
+                return
+            if self._near_vertical_segment(event.x, event.y, coords[0], coords[1], mid_y):
+                if not connection.src:
+                    return
+                port_info = self._find_port(connection.src[0], connection.src[1], "out")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "src_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            if self._near_vertical_segment(event.x, event.y, coords[6], mid_y, coords[7]):
+                if not connection.dst:
+                    return
+                port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+                if not port_info:
+                    return
+                node, port = port_info
+                if node.resize_enabled:
+                    return
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "dst_port"
+                self._drag_wire["node"] = node
+                self._drag_wire["port"] = port
+                return
+            return
+        mid_x = coords[2]
+        y1a = coords[3]
+        y2a = coords[5]
+        if self._near_vertical_segment(event.x, event.y, mid_x, y1a, y2a):
+            self._drag_wire["connection"] = connection
+            self._drag_wire["offset"] = event.x - mid_x
+            self._drag_wire["mode"] = "mid"
+            return
+        if self._near_horizontal_segment(event.x, event.y, coords[0], mid_x, y1a):
+            if not connection.src:
+                return
+            port_info = self._find_port(connection.src[0], connection.src[1], "out")
+            if not port_info:
+                return
+            node, port = port_info
+            if node.resize_enabled:
+                return
+            self._drag_wire["connection"] = connection
+            self._drag_wire["mode"] = "src_port"
+            self._drag_wire["node"] = node
+            self._drag_wire["port"] = port
+            return
+        if self._near_horizontal_segment(event.x, event.y, mid_x, coords[6], y2a):
+            if not connection.dst:
+                return
+            port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+            if not port_info:
+                return
+            node, port = port_info
+            if node.resize_enabled:
+                return
+            self._drag_wire["connection"] = connection
+            self._drag_wire["mode"] = "dst_port"
+            self._drag_wire["node"] = node
+            self._drag_wire["port"] = port
+            return
+
+    def _on_wire_motion(self, event):
+        connection: Connection | None = self._drag_wire["connection"]
+        if not connection:
+            return
+        mode = self._drag_wire["mode"]
+        if mode == "mid":
+            if self._connection_manual_locked(connection):
+                return
+            raw_mid = event.x - self._drag_wire["offset"]
+            connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
+            if not connection.src or not connection.dst:
+                return
+            src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+            dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+            if not src_id or not dst_id:
+                return
+            x1, y1 = self._port_center(src_id)
+            x2, y2 = self._port_center(dst_id)
+            coords = self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+            self.canvas.coords(connection.line_id, *coords)
+            return
+        if mode == "mid_y":
+            if self._connection_manual_locked(connection):
+                return
+            raw_mid = event.y - self._drag_wire["offset"]
+            connection.manual_mid_y = self._snap_to_step(raw_mid, self.MID_STEP)
+            if not connection.src or not connection.dst:
+                return
+            src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
+            dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1], "in")
+            if not src_id or not dst_id:
+                return
+            x1, y1 = self._port_center(src_id)
+            x2, y2 = self._port_center(dst_id)
+            coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
+            self.canvas.coords(connection.line_id, *coords)
+            return
+        if mode in ("src_port", "dst_port"):
+            if self._mode != "normal":
+                return
+            node = self._drag_wire["node"]
+            port = self._drag_wire["port"]
+            if not node or not port:
+                return
+            self._move_port(node, port, event.x, event.y)
+            return
+
+    def _on_wire_release(self, _event):
+        self._drag_wire["connection"] = None
+        self._drag_wire["mode"] = None
+        self._drag_wire["port"] = None
+        self._drag_wire["node"] = None
+
+    def _near_vertical_segment(
+        self,
+        px: float,
+        py: float,
+        x: float,
+        y1: float,
+        y2: float,
+        threshold: float = 6.0,
+    ) -> bool:
+        if abs(px - x) > threshold:
+            return False
+        return min(y1, y2) - threshold <= py <= max(y1, y2) + threshold
+
+    def _near_horizontal_segment(
+        self,
+        px: float,
+        py: float,
+        x1: float,
+        x2: float,
+        y: float,
+        threshold: float = 6.0,
+    ) -> bool:
+        if abs(py - y) > threshold:
+            return False
+        return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
+
+    def _move_port(self, node: Node, port: Port, target_x: float, target_y: float):
+        if port.canvas_id is None:
+            return
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        radius = self.PORT_RADIUS
+        if port.side in ("left", "right"):
+            min_y = y1 + radius
+            max_y = y2 - radius
+            new_y = max(min_y, min(target_y, max_y))
+            new_y = self._snap_value(new_y, int(min_y))
+            port.offset = 0 if y2 == y1 else (new_y - y1) / (y2 - y1)
+            port.manual_y = new_y
+            x = x1 if port.side == "left" else x2
+            self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
+        else:
+            min_x = x1 + radius
+            max_x = x2 - radius
+            new_x = max(min_x, min(target_x, max_x))
+            new_x = self._snap_value(new_x, int(min_x))
+            port.offset = 0 if x2 == x1 else (new_x - x1) / (x2 - x1)
+            port.manual_y = None
+            y = y1 if port.side == "top" else y2
+            self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
+        self._update_connections()
+
+    def _on_port_press(self, event):
+        if self._mode == "delete_port":
+            self._handle_delete_port_click(event)
+            return
+        if self._mode != "connect":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        port_info = self._port_items.get(item[0])
+        if not port_info:
+            return
+        node_name, port_name = port_info
+        port_data = self._find_port(node_name, port_name, "in") or self._find_port(node_name, port_name, "out")
+        if not port_data:
+            return
+        node, port = port_data
+        if not self._selected_ports:
+            self._selected_ports.append((node_name, port_name))
+            self._set_port_color(port, "blue")
+            return
+        if len(self._selected_ports) == 1:
+            first_node, first_port = self._selected_ports[0]
+            if first_node == node_name:
+                self._reset_connect_mode()
+                return
+            first_port_data = self._find_port(first_node, first_port, "in") or self._find_port(first_node, first_port, "out")
+            if not first_port_data:
+                self._reset_connect_mode()
+                return
+            src = (first_node, first_port)
+            dst = (node_name, port_name)
+            connection = Connection(src=src, dst=dst)
+            self.connections.append(connection)
+            self._draw_connection(connection)
+            self._reset_connect_mode()
+            return
+
+    def _open_new_block(self):
+        window = tk.Toplevel(self.root)
+        window.title("New")
+        mode_var = tk.StringVar(value="block")
+        tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
+            row=0, column=0, padx=6, pady=6, sticky="w"
+        )
+        tk.Radiobutton(window, text="Gate", variable=mode_var, value="gate").grid(
+            row=0, column=1, padx=6, pady=6, sticky="w"
+        )
+
+        tk.Label(window, text="Name").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        name_entry = tk.Entry(window)
+        name_entry.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Inputs").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        in_entry = tk.Entry(window)
+        in_entry.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Outputs").grid(row=3, column=0, padx=6, pady=6, sticky="w")
+        out_entry = tk.Entry(window)
+        out_entry.grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Gate Type").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        gate_var = tk.StringVar(value="AND2")
+        gate_menu = tk.OptionMenu(window, gate_var, *self._gate_types())
+        gate_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
+
+        def _toggle_fields(*_args):
+            is_gate = mode_var.get() == "gate"
+            state_block = "disabled"
+            state_gate = "normal" if is_gate else "disabled"
+            in_entry.configure(state=state_block)
+            out_entry.configure(state=state_block)
+            gate_menu.configure(state=state_gate)
+
+        mode_var.trace_add("write", _toggle_fields)
+        _toggle_fields()
+
+        def _create_block():
+            name = name_entry.get().strip()
+            if not name or name in self.nodes:
+                return
+            if mode_var.get() == "gate":
+                gate_kind = gate_var.get()
+                gate_def = self._gate_definitions()[gate_kind]
+                inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
+                outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
+                _assign_port_offsets(inputs, "left")
+                _assign_port_offsets(outputs, "right")
+                width = gate_def["width"]
+                height = gate_def["height"]
+                x, y = self._next_block_position()
+                node = Node(
+                    name=name,
+                    kind=gate_kind,
+                    inputs=inputs,
+                    outputs=outputs,
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    base_height=height,
+                )
+            else:
+                inputs = []
+                outputs = []
+                base_height = 100
+                x, y = self._next_block_position()
+                node = Node(
+                    name=name,
+                    kind="BLOCK",
+                    inputs=inputs,
+                    outputs=outputs,
+                    x=x,
+                    y=y,
+                    width=160,
+                    height=base_height,
+                    base_height=base_height,
+                )
+            self.nodes[name] = node
+            self._draw_node(node)
+            self._raise_node_and_wires(node.name)
+            window.destroy()
+
+        tk.Button(window, text="Create", command=_create_block).grid(row=5, column=0, columnspan=3, pady=8)
+
+    def _next_block_position(self) -> tuple[int, int]:
+        if not self.nodes:
+            return (80, 80)
+        max_y = max(node.y + node.height for node in self.nodes.values())
+        x = 80
+        y = max_y + 60
+        if y > 600:
+            y = 80
+            x = max(node.x + node.width for node in self.nodes.values()) + 60
+        return x, y
+
+    def _toggle_connect_mode(self):
+        if self._mode == "connect":
+            self._reset_connect_mode()
+            return
+        if self._mode == "disconnect":
+            self._toggle_disconnect_mode()
+        if self._mode in ("create_port", "delete_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "connect"
+        self._selected_ports = []
+        self._set_all_port_colors("yellow")
+
+    def _reset_connect_mode(self):
+        self._selected_ports = []
+        self._set_all_port_colors("black")
+        self._mode = "normal"
+
+    def _toggle_disconnect_mode(self):
+        if self._mode == "disconnect":
+            self._set_all_wire_colors("#333333")
+            self._mode = "normal"
+            return
+        if self._mode == "connect":
+            self._reset_connect_mode()
+        if self._mode in ("create_port", "delete_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "disconnect"
+        self._set_all_wire_colors("red")
+
+    def _set_all_port_colors(self, color: str):
+        for node in self.nodes.values():
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, color)
+
+    def _set_port_color(self, port: Port, color: str):
+        port.color = color
+        if port.canvas_id:
+            hidden = not self._show_ports and color == "black"
+            fill = "" if hidden else color
+            outline = "" if hidden else color
+            width = 0 if hidden else 1
+            self.canvas.itemconfig(port.canvas_id, fill=fill, outline=outline, width=width)
+
+    def _set_all_wire_colors(self, color: str):
+        for connection in self.connections:
+            if connection.line_id:
+                self.canvas.itemconfig(connection.line_id, fill=color)
+
+    def _remove_connection(self, connection: Connection):
+        if connection.line_id:
+            self.canvas.delete(connection.line_id)
+        if connection.label_id:
+            self.canvas.delete(connection.label_id)
+        self.connections = [conn for conn in self.connections if conn is not connection]
+
+    def _remove_port(self, node: Node, port: Port):
+        if port.canvas_id:
+            self.canvas.delete(port.canvas_id)
+            self._port_items.pop(port.canvas_id, None)
+        node.inputs = [p for p in node.inputs if p is not port]
+        node.outputs = [p for p in node.outputs if p is not port]
+        to_remove = [conn for conn in self.connections if conn.src == (node.name, port.name) or conn.dst == (node.name, port.name)]
+        for conn in to_remove:
+            self._remove_connection(conn)
+        self._update_connections()
+
+    def _toggle_ports(self):
+        self._show_ports = not self._show_ports
+        for node in self.nodes.values():
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, port.color)
+
+    def _toggle_create_port_mode(self):
+        if self._mode == "create_port":
+            self._reset_port_mode()
+            return
+        if not self._active_node_name:
+            return
+        if self._mode in ("connect", "disconnect", "delete_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "create_port"
+        node = self.nodes.get(self._active_node_name)
+        if node and node.kind == "BLOCK":
+            node.outline_color = "green"
+            node.resize_enabled = True
+            self._redraw_node(node)
+        else:
+            self._mode = "normal"
+
+    def _toggle_delete_port_mode(self):
+        if self._mode == "delete_port":
+            self._reset_port_mode()
+            return
+        if not self._active_node_name:
+            return
+        if self._mode in ("connect", "disconnect", "create_port", "wire_name"):
+            self._reset_port_mode()
+        self._mode = "delete_port"
+        node = self.nodes.get(self._active_node_name)
+        if node and node.kind == "BLOCK":
+            node.resize_enabled = True
+            for port in node.inputs + node.outputs:
+                self._set_port_color(port, "red")
+        else:
+            self._mode = "normal"
+
+    def _toggle_wire_name_mode(self):
+        if self._mode == "wire_name":
+            self._set_all_wire_colors("#333333")
+            self._mode = "normal"
+            return
+        if self._mode in ("connect", "disconnect", "create_port", "delete_port"):
+            self._reset_port_mode()
+        self._mode = "wire_name"
+        self._set_all_wire_colors("blue")
+
+    def _reset_port_mode(self):
+        if self._mode == "connect":
+            self._reset_connect_mode()
+        if self._mode == "disconnect":
+            self._set_all_wire_colors("#333333")
+        if self._mode == "create_port" and self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                node.outline_color = "#666666"
+                node.resize_enabled = False
+                self._redraw_node(node)
+        if self._mode == "delete_port" and self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                for port in node.inputs + node.outputs:
+                    self._set_port_color(port, "black")
+                node.resize_enabled = False
+                self._redraw_node(node)
+        if self._mode == "wire_name":
+            self._set_all_wire_colors("#333333")
+        self._mode = "normal"
+
+    def _handle_create_port_click(self, event):
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node or node.kind != "BLOCK":
+            return
+        edge = self._edge_for_point(node, event.x, event.y)
+        if not edge:
+            return
+        port_name = f"p{len(node.inputs) + len(node.outputs) + 1}"
+        offset = self._edge_offset(node, edge, event.x, event.y)
+        port = Port(name=port_name, kind="io", side=edge, offset=offset)
+        node.inputs.append(port)
+        node.outline_color = "#666666"
+        node.resize_enabled = False
+        self._redraw_node(node)
+        self._mode = "normal"
+
+    def _handle_delete_port_click(self, event):
+        if not self._active_node_name:
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        port_info = self._port_items.get(item[0])
+        if not port_info:
+            return
+        node_name, port_name = port_info
+        if node_name != self._active_node_name:
+            return
+        node = self.nodes.get(node_name)
+        if not node:
+            return
+        port = next((p for p in node.inputs + node.outputs if p.name == port_name), None)
+        if not port:
+            return
+        self._remove_port(node, port)
+        self._reset_port_mode()
+
+    def _bring_active_front(self):
+        if not self._active_node_name:
+            return
+        self._raise_node_and_wires(self._active_node_name)
+
+    def _send_active_back(self):
+        if not self._active_node_name:
+            return
+        self.canvas.tag_lower(f"node:{self._active_node_name}")
+        for connection in self.connections:
+            if connection.src and connection.src[0] == self._active_node_name:
+                self._lower_connection(connection)
+            if connection.dst and connection.dst[0] == self._active_node_name:
+                self._lower_connection(connection)
+
+    def _gate_types(self) -> list[str]:
+        return list(self._gate_definitions().keys())
+
+    def _gate_definitions(self) -> dict[str, dict[str, int]]:
+        return self._gate_definitions_static()
+
+    def _load_gate_image(self, gate_kind: str) -> tk.PhotoImage | None:
+        if gate_kind in self._gate_images:
+            return self._gate_images[gate_kind]
+        image_path = Path(__file__).resolve().parent / "gate_image" / f"{gate_kind}.png"
+        if not image_path.exists():
+            return None
+        image = tk.PhotoImage(file=str(image_path))
+        self._gate_images[gate_kind] = image
+        return image
+
+    @staticmethod
+    def _gate_definitions_static() -> dict[str, dict[str, int]]:
+        return {
+            "AND2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "OR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "XOR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "XOR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
+            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 40},
+            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 40},
+            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
+            "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 40},
+        }
+
+    def _draw_gate_shape(self, node: Node, x1: float, y1: float, x2: float, y2: float) -> list[int]:
+        kind = node.kind
+        items: list[int] = []
+        outline = node.outline_color
+        fill = "#e0e0e0"
+        if kind.startswith("AND"):
+            mid_x = (x1 + x2) / 2
+            rect = self.canvas.create_rectangle(x1, y1, mid_x, y2, fill=fill, outline="", width=0)
+            arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.PIESLICE,
+                fill=fill,
+                outline="",
+                width=0,
+            )
+            left = self.canvas.create_line(x1, y1, x1, y2, fill=outline, width=2)
+            top = self.canvas.create_line(x1, y1, mid_x, y1, fill=outline, width=2)
+            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill=outline, width=2)
+            outline_arc = self.canvas.create_arc(
+                mid_x - (x2 - x1) / 2,
+                y1,
+                x2,
+                y2,
+                start=-90,
+                extent=180,
+                style=tk.ARC,
+                outline=outline,
+                width=2,
+            )
+            items.extend([rect, arc, left, top, bottom, outline_arc])
+            return items
+        if kind.startswith("OR"):
+            back = self.canvas.create_line(
+                x1,
+                y1,
+                x1 + (x2 - x1) * 0.3,
+                y2,
+                smooth=True,
+                fill=outline,
+                width=2,
+            )
+            front = self.canvas.create_line(
+                x1 + (x2 - x1) * 0.3,
+                y1,
+                x2,
+                (y1 + y2) / 2,
+                x1 + (x2 - x1) * 0.3,
+                y2,
+                smooth=True,
+                fill=outline,
+                width=2,
+            )
+            fill_poly = self.canvas.create_polygon(
+                x1 + (x2 - x1) * 0.25,
+                y1 + 1,
+                x2 - 1,
+                (y1 + y2) / 2,
+                x1 + (x2 - x1) * 0.25,
+                y2 - 1,
+                x1 + (x2 - x1) * 0.1,
+                y2 - 1,
+                x1 + (x2 - x1) * 0.1,
+                y1 + 1,
+                fill=fill,
+                outline="",
+                smooth=True,
+            )
+            items.extend([fill_poly, back, front])
+            return items
+        if kind.startswith("MUX"):
+            poly = self.canvas.create_polygon(
+                x1,
+                y1,
+                x2,
+                y1 + (y2 - y1) * 0.2,
+                x2,
+                y2 - (y2 - y1) * 0.2,
+                x1,
+                y2,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+            items.append(poly)
+            return items
+        if kind.startswith("DEMUX"):
+            poly = self.canvas.create_polygon(
+                x1,
+                y1 + (y2 - y1) * 0.2,
+                x2,
+                y1,
+                x2,
+                y2,
+                x1,
+                y2 - (y2 - y1) * 0.2,
+                fill=fill,
+                outline=outline,
+                width=2,
+            )
+            items.append(poly)
+            return items
+        if kind == "DFF":
+            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
+            clock = self.canvas.create_polygon(
+                x1,
+                (y1 + y2) / 2 - 6,
+                x1 + 8,
+                (y1 + y2) / 2,
+                x1,
+                (y1 + y2) / 2 + 6,
+                fill=outline,
+                outline=outline,
+            )
+            items.extend([rect, clock])
+            return items
+        rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
+        items.append(rect)
+        return items
+
+    def save_diagram(self, path: Path):
+        self.root.update()
+        ps_path = path.with_suffix(".ps")
+        self.canvas.postscript(file=ps_path, colormode="color")
+        try:
+            from PIL import Image
+
+            img = Image.open(ps_path)
+            img.save(path)
+        except Exception as exc:
+            print(f"PNG 저장 실패: {exc}. PostScript 파일로 저장합니다: {ps_path}")
+
+    def run(self):
+        self.root.mainloop()
+
+
+def _build_ports(value: str, prefix: str) -> list[str]:
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        count = int(text)
+    except ValueError:
+        raise ValueError(f"포트 개수는 숫자로 입력해야 합니다: {value}")
+    if count < 0:
+        raise ValueError(f"포트 개수는 0 이상이어야 합니다: {value}")
+    return [f"{prefix}{idx}" for idx in range(1, count + 1)]
+
+
+def _assign_port_offsets(ports: list[Port], side: str):
+    total = len(ports)
+    if total == 0:
+        return
+    for idx, port in enumerate(ports, start=1):
+        port.side = side
+        port.offset = idx / (total + 1)
+
+
+def parse_blocks(path: Path) -> dict[str, Node]:
+    config = configparser.ConfigParser()
+    config.read(path)
+    nodes: dict[str, Node] = {}
+    x, y = 80, 80
+    for section in config.sections():
+        inputs = _build_ports(config.get(section, "in", fallback=""), "in")
+        outputs = _build_ports(config.get(section, "out", fallback=""), "out")
+        base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
+        input_ports = [Port(name=p, kind="in") for p in inputs]
+        output_ports = [Port(name=p, kind="out") for p in outputs]
+        _assign_port_offsets(input_ports, "left")
+        _assign_port_offsets(output_ports, "right")
+        node = Node(
+            name=section,
+            kind="BLOCK",
+            inputs=input_ports,
+            outputs=output_ports,
+            x=x,
+            y=y,
+            width=160,
+            height=base_height,
+            base_height=base_height,
+        )
+        nodes[section] = node
+        y += 160
+        if y > 600:
+            y = 80
+            x += 260
+    return nodes
+
+
+def parse_connections(
+    path: Path,
+    nodes: dict[str, Node],
+) -> list[Connection]:
+    connections: list[Connection] = []
+    gate_index = 1
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        line, label = _split_label(line)
+        gate_match = re.match(
+            r"^(AND2|AND4|OR2|OR4|XOR2|XOR4|INV|MUX_2x1|MUX_4x1|DEMUX_1x2|DEMUX_1x4|DFF)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$",
+            line,
+        )
+        if gate_match:
+            gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
+            inputs = [item.strip() for item in inputs_raw.split(",") if item.strip()]
+            output = output_raw.strip()
+            gate_def = DiagramApp._gate_definitions_static()
+            outputs_count = gate_def[gate_type]["outputs"]
+            input_ports = [Port(name=f"in{idx+1}", kind="in") for idx in range(len(inputs))]
+            output_ports = [Port(name=f"out{idx+1}", kind="out") for idx in range(outputs_count)]
+            _assign_port_offsets(input_ports, "left")
+            _assign_port_offsets(output_ports, "right")
+            gate_node = Node(
+                name=gate_name,
+                kind=gate_type,
+                inputs=input_ports,
+                outputs=output_ports,
+                x=400 + gate_index * 40,
+                y=120 + gate_index * 40,
+                width=60,
+                height=40,
+                base_height=40,
+            )
+            nodes[gate_name] = gate_node
+            gate_index += 1
+            for idx, source in enumerate(inputs):
+                src_node, src_port = source.split(".", 1)
+                connections.append(
+                    Connection(src=(src_node, src_port), dst=(gate_name, f"in{idx+1}"), label=label)
+                )
+            dst_node, dst_port = output.split(".", 1)
+            connections.append(Connection(src=(gate_name, "out"), dst=(dst_node, dst_port), label=label))
+            continue
+
+        direct_match = re.match(r"^(\S+)\s*->\s*(\S+)$", line)
+        if direct_match:
+            src, dst = direct_match.groups()
+            src_node, src_port = src.split(".", 1)
+            dst_node, dst_port = dst.split(".", 1)
+            connections.append(Connection(src=(src_node, src_port), dst=(dst_node, dst_port), label=label))
+            continue
+
+        dst_only_match = re.match(r"^->\s*(\S+)$", line)
+        if dst_only_match:
+            dst = dst_only_match.group(1)
+            dst_node, dst_port = dst.split(".", 1)
+            connections.append(Connection(src=None, dst=(dst_node, dst_port), label=label))
+            continue
+
+        src_only_match = re.match(r"^(\S+)\s*->$", line)
+        if src_only_match:
+            src = src_only_match.group(1)
+            src_node, src_port = src.split(".", 1)
+            connections.append(Connection(src=(src_node, src_port), dst=None, label=label))
+            continue
+
+        raise ValueError(f"연결 형식을 파싱할 수 없습니다: {line}")
+    return connections
+
+
+def _split_label(line: str) -> tuple[str, str | None]:
+    if "|" not in line:
+        return line, None
+    base, raw_label = line.split("|", 1)
+    label = raw_label.strip()
+    label = label.replace("\\n", "\n")
+    return base.strip(), label if label else None
+
+
+def validate_connections(nodes: dict[str, Node], connections: list[Connection], log_path: Path) -> bool:
+    used_inputs: set[tuple[str, str]] = set()
+    used_outputs: set[tuple[str, str]] = set()
+    for connection in connections:
+        if connection.src:
+            used_outputs.add(connection.src)
+        if connection.dst:
+            used_inputs.add(connection.dst)
+
+    errors: list[str] = []
+    for node in nodes.values():
+        if node.kind != "BLOCK":
+            continue
+        for port in node.inputs:
+            if (node.name, port.name) not in used_inputs:
+                errors.append(f"[WARN] 입력 포트 미연결: {node.name}.{port.name}")
+                port.connected = False
+        for port in node.outputs:
+            if (node.name, port.name) not in used_outputs:
+                errors.append(f"[WARN] 출력 포트 미연결: {node.name}.{port.name}")
+                port.connected = False
+
+    if errors:
+        log_path.write_text("\n".join(errors), encoding="utf-8")
+        print(f"미연결 포트가 있습니다. {log_path}를 확인하세요.")
+        return True
+    if log_path.exists():
+        log_path.unlink()
+    return True
+
+
+def main():
+    blocks_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("input.txt")
+    connections_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("connections.txt")
+    output_path = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("diagram.png")
+    if not blocks_path.exists() or not connections_path.exists():
+        print("input.txt 또는 connections.txt 파일이 없습니다.")
+        sys.exit(1)
+    nodes = parse_blocks(blocks_path)
+    connections = parse_connections(connections_path, nodes)
+    validate_connections(nodes, connections, Path("error.log"))
+    app = DiagramApp(nodes, connections, output_path)
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
