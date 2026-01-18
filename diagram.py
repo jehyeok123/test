@@ -42,6 +42,7 @@ class Node:
     level: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
+    image_subsample: int = 10
 
 
 @dataclass
@@ -89,6 +90,8 @@ class DiagramApp:
         self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.edit_button = tk.Button(self.toolbar, text="EDIT", command=self._open_edit_block)
         self.edit_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.remove_button = tk.Button(self.toolbar, text="REMOVE", command=self._remove_active_node)
+        self.remove_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.save_button = tk.Button(self.toolbar, text="JSON SAVE", command=self._save_json)
         self.save_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
@@ -121,7 +124,8 @@ class DiagramApp:
         self._port_items: dict[int, tuple[str, str]] = {}
         self._selected_ports: list[tuple[str, str]] = []
         self._active_node_name: str | None = None
-        self._gate_images: dict[str, tk.PhotoImage] = {}
+        self._gate_images: dict[tuple[str, int], tk.PhotoImage] = {}
+        self._gate_source_images: dict[str, tk.PhotoImage] = {}
         self._zoom_scale = 1.0
         self._outline_backup: dict[str, str] = {}
         self._build_ui()
@@ -146,7 +150,14 @@ class DiagramApp:
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         if node.kind != "BLOCK":
-            image = self._load_gate_image(node.kind)
+            base_image = self._gate_base_image(node.kind)
+            if base_image and node.image_subsample <= 0:
+                base_w = base_image.width()
+                base_h = base_image.height()
+                width_ratio = base_w / max(1, node.width)
+                height_ratio = base_h / max(1, node.height)
+                node.image_subsample = max(1, int(round(max(width_ratio, height_ratio))))
+            image = self._load_gate_image(node.kind, node.image_subsample)
             if image:
                 node.image = image
                 node.width = image.width()
@@ -155,8 +166,26 @@ class DiagramApp:
                 x2, y2 = node.x + node.width, node.y + node.height
                 node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
                 node.items.append(node.image_id)
+                if node.resize_enabled:
+                    outline = self.canvas.create_rectangle(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        outline="black",
+                        width=3,
+                    )
+                    node.items.append(outline)
             else:
-                node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
+                rect = self.canvas.create_rectangle(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    outline="black",
+                    width=2,
+                )
+                node.items.append(rect)
         else:
             base_width = 4 if node.resize_enabled else 2
             outline_width = max(1, base_width * node.outline_scale)
@@ -261,7 +290,16 @@ class DiagramApp:
                 self._resize_data["mode"] = resize_mode
                 self._resize_data["x"] = event.x
                 self._resize_data["y"] = event.y
-                self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+                if node.kind == "BLOCK":
+                    self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
+                else:
+                    self._resize_data["orig"] = (
+                        node.x,
+                        node.y,
+                        node.width,
+                        node.height,
+                        node.image_subsample,
+                    )
                 self.canvas.bind("<B1-Motion>", self._on_resize_motion)
                 self.canvas.bind("<ButtonRelease-1>", self._on_resize_release)
             return
@@ -310,7 +348,7 @@ class DiagramApp:
         self._update_connections()
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
-        if node.kind != "BLOCK" or not node.resize_enabled:
+        if not node.resize_enabled:
             return None
         left = node.x
         right = node.x + node.width
@@ -363,8 +401,6 @@ class DiagramApp:
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
         self._active_node_name = node.name
-        if node.kind != "BLOCK":
-            return
         node.resize_enabled = not node.resize_enabled
         self._redraw_node(node)
         self._update_connections()
@@ -374,6 +410,9 @@ class DiagramApp:
         mode = self._resize_data["mode"]
         orig = self._resize_data["orig"]
         if not node or not mode or not orig:
+            return
+        if node.kind != "BLOCK":
+            self._resize_gate(node, mode, orig, event)
             return
         orig_x, orig_y, orig_width, orig_height = orig
         dx = event.x - self._resize_data["x"]
@@ -400,6 +439,59 @@ class DiagramApp:
                 port.manual_y = prev[1]
         elif mode == "bottom":
             node.height = self._snap_value(max(min_height, orig_height + dy), min_height)
+        self._redraw_node(node)
+        self._update_connections()
+
+    def _resize_gate(self, node: Node, mode: str, orig: tuple, event):
+        base_image = self._gate_base_image(node.kind)
+        if not base_image:
+            return
+        orig_x, orig_y, orig_width, orig_height, _orig_subsample = orig
+        orig_right = orig_x + orig_width
+        orig_bottom = orig_y + orig_height
+        base_w = base_image.width()
+        base_h = base_image.height()
+        aspect = base_w / base_h if base_h else 1.0
+        min_size = self.GRID_STEP
+
+        if mode == "right":
+            desired_w = max(min_size, event.x - orig_x)
+            desired_w = self._snap_value(desired_w, min_size)
+            desired_h = desired_w / aspect if aspect else desired_w
+            node.x = orig_x
+            node.y = orig_bottom - desired_h
+        elif mode == "top":
+            desired_h = max(min_size, orig_bottom - event.y)
+            desired_h = self._snap_value(desired_h, min_size)
+            desired_w = desired_h * aspect
+            node.x = orig_x
+            node.y = orig_bottom - desired_h
+        elif mode == "left":
+            desired_w = max(min_size, orig_right - event.x)
+            desired_w = self._snap_value(desired_w, min_size)
+            desired_h = desired_w / aspect if aspect else desired_w
+            node.x = orig_right - desired_w
+            node.y = orig_y
+        elif mode == "bottom":
+            desired_h = max(min_size, event.y - orig_y)
+            desired_h = self._snap_value(desired_h, min_size)
+            desired_w = desired_h * aspect
+            node.x = orig_right - desired_w
+            node.y = orig_y
+        else:
+            return
+
+        desired_w = max(min_size, desired_w)
+        subsample = max(1, int(round(base_w / desired_w))) if base_w else 1
+        node.image_subsample = subsample
+        node.width = base_w / subsample if subsample else base_w
+        node.height = base_h / subsample if subsample else base_h
+        if mode in ("right", "top"):
+            node.x = orig_x
+            node.y = orig_bottom - node.height
+        else:
+            node.x = orig_right - node.width
+            node.y = orig_y
         self._redraw_node(node)
         self._update_connections()
 
@@ -944,8 +1036,6 @@ class DiagramApp:
     def _move_port(self, node: Node, port: Port, target_x: float, target_y: float):
         if port.canvas_id is None:
             return
-        if node.kind != "BLOCK":
-            return
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         radius = self.PORT_RADIUS
@@ -1291,6 +1381,26 @@ class DiagramApp:
             if connection.line_id:
                 self.canvas.itemconfig(connection.line_id, fill=color)
 
+    def _remove_active_node(self):
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node:
+            return
+        to_remove = [
+            conn
+            for conn in self.connections
+            if (conn.src and conn.src[0] == node.name) or (conn.dst and conn.dst[0] == node.name)
+        ]
+        for conn in to_remove:
+            self._remove_connection(conn)
+        for item in node.items:
+            self.canvas.delete(item)
+        self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
+        self._outline_backup.pop(node.name, None)
+        self.nodes.pop(node.name, None)
+        self._active_node_name = None
+
     def _remove_connection(self, connection: Connection):
         if connection.line_id:
             self.canvas.delete(connection.line_id)
@@ -1454,9 +1564,12 @@ class DiagramApp:
         for node in self.nodes.values():
             node.x *= factor
             node.y *= factor
-            node.width *= factor
-            node.height *= factor
-            node.base_height *= factor
+            if node.kind == "BLOCK":
+                node.width *= factor
+                node.height *= factor
+                node.base_height *= factor
+            else:
+                node.image_subsample = max(1, int(round(node.image_subsample / factor)))
             for port in node.inputs + node.outputs:
                 if port.manual_y is not None:
                     port.manual_y *= factor
@@ -1563,15 +1676,25 @@ class DiagramApp:
     def _gate_definitions(self) -> dict[str, dict[str, int]]:
         return self._gate_definitions_static()
 
-    def _load_gate_image(self, gate_kind: str) -> tk.PhotoImage | None:
-        if gate_kind in self._gate_images:
-            return self._gate_images[gate_kind]
+    def _gate_base_image(self, gate_kind: str) -> tk.PhotoImage | None:
+        if gate_kind in self._gate_source_images:
+            return self._gate_source_images[gate_kind]
         image_path = Path(__file__).resolve().parent / "gate_image" / f"{gate_kind}.png"
         if not image_path.exists():
             return None
         image = tk.PhotoImage(file=str(image_path))
-        image = image.subsample(10, 10)
-        self._gate_images[gate_kind] = image
+        self._gate_source_images[gate_kind] = image
+        return image
+
+    def _load_gate_image(self, gate_kind: str, subsample: int) -> tk.PhotoImage | None:
+        key = (gate_kind, subsample)
+        if key in self._gate_images:
+            return self._gate_images[key]
+        base_image = self._gate_base_image(gate_kind)
+        if not base_image:
+            return None
+        image = base_image.subsample(subsample, subsample)
+        self._gate_images[key] = image
         return image
 
     @staticmethod
@@ -1590,130 +1713,6 @@ class DiagramApp:
             "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
             "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 40},
         }
-
-    def _draw_gate_shape(self, node: Node, x1: float, y1: float, x2: float, y2: float) -> list[int]:
-        kind = node.kind
-        items: list[int] = []
-        outline = node.outline_color
-        fill = node.fill_color
-        if kind.startswith("AND"):
-            mid_x = (x1 + x2) / 2
-            rect = self.canvas.create_rectangle(x1, y1, mid_x, y2, fill=fill, outline="", width=0)
-            arc = self.canvas.create_arc(
-                mid_x - (x2 - x1) / 2,
-                y1,
-                x2,
-                y2,
-                start=-90,
-                extent=180,
-                style=tk.PIESLICE,
-                fill=fill,
-                outline="",
-                width=0,
-            )
-            left = self.canvas.create_line(x1, y1, x1, y2, fill=outline, width=2)
-            top = self.canvas.create_line(x1, y1, mid_x, y1, fill=outline, width=2)
-            bottom = self.canvas.create_line(x1, y2, mid_x, y2, fill=outline, width=2)
-            outline_arc = self.canvas.create_arc(
-                mid_x - (x2 - x1) / 2,
-                y1,
-                x2,
-                y2,
-                start=-90,
-                extent=180,
-                style=tk.ARC,
-                outline=outline,
-                width=2,
-            )
-            items.extend([rect, arc, left, top, bottom, outline_arc])
-            return items
-        if kind.startswith("OR"):
-            back = self.canvas.create_line(
-                x1,
-                y1,
-                x1 + (x2 - x1) * 0.3,
-                y2,
-                smooth=True,
-                fill=outline,
-                width=2,
-            )
-            front = self.canvas.create_line(
-                x1 + (x2 - x1) * 0.3,
-                y1,
-                x2,
-                (y1 + y2) / 2,
-                x1 + (x2 - x1) * 0.3,
-                y2,
-                smooth=True,
-                fill=outline,
-                width=2,
-            )
-            fill_poly = self.canvas.create_polygon(
-                x1 + (x2 - x1) * 0.25,
-                y1 + 1,
-                x2 - 1,
-                (y1 + y2) / 2,
-                x1 + (x2 - x1) * 0.25,
-                y2 - 1,
-                x1 + (x2 - x1) * 0.1,
-                y2 - 1,
-                x1 + (x2 - x1) * 0.1,
-                y1 + 1,
-                fill=fill,
-                outline="",
-                smooth=True,
-            )
-            items.extend([fill_poly, back, front])
-            return items
-        if kind.startswith("MUX"):
-            poly = self.canvas.create_polygon(
-                x1,
-                y1,
-                x2,
-                y1 + (y2 - y1) * 0.2,
-                x2,
-                y2 - (y2 - y1) * 0.2,
-                x1,
-                y2,
-                fill=fill,
-                outline=outline,
-                width=2,
-            )
-            items.append(poly)
-            return items
-        if kind.startswith("DEMUX"):
-            poly = self.canvas.create_polygon(
-                x1,
-                y1 + (y2 - y1) * 0.2,
-                x2,
-                y1,
-                x2,
-                y2,
-                x1,
-                y2 - (y2 - y1) * 0.2,
-                fill=fill,
-                outline=outline,
-                width=2,
-            )
-            items.append(poly)
-            return items
-        if kind == "DFF":
-            rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
-            clock = self.canvas.create_polygon(
-                x1,
-                (y1 + y2) / 2 - 6,
-                x1 + 8,
-                (y1 + y2) / 2,
-                x1,
-                (y1 + y2) / 2 + 6,
-                fill=outline,
-                outline=outline,
-            )
-            items.extend([rect, clock])
-            return items
-        rect = self.canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=outline, width=2)
-        items.append(rect)
-        return items
 
     def save_diagram(self, path: Path):
         self.root.update()
@@ -1851,6 +1850,7 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
             level=int(level) if level is not None else 0,
         )
         if node.kind != "BLOCK":
+            node.image_subsample = 0
             snap = lambda value: int(round(value / DiagramApp.GRID_STEP) * DiagramApp.GRID_STEP)
             node.x = snap(node.x)
             node.y = snap(node.y)
