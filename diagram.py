@@ -37,6 +37,8 @@ class Node:
     outline_style: str = "solid"
     outline_scale: float = 1.0
     label_font_size: int = 12
+    label_font_family: str = "Arial"
+    label_font_weight: str = "bold"
     level: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
@@ -54,7 +56,7 @@ class Connection:
 
 
 class DiagramApp:
-    GRID_STEP = 10
+    GRID_STEP = 5
     MID_STEP = 5
     PORT_RADIUS = 5
     COLOR_NAME_TO_HEX = {
@@ -85,7 +87,9 @@ class DiagramApp:
         self.toolbar.pack(fill=tk.X)
         self.new_button = tk.Button(self.toolbar, text="NEW", command=self._open_new_block)
         self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.save_button = tk.Button(self.toolbar, text="SAVE", command=self._save_json)
+        self.edit_button = tk.Button(self.toolbar, text="EDIT", command=self._open_edit_block)
+        self.edit_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.save_button = tk.Button(self.toolbar, text="JSON SAVE", command=self._save_json)
         self.save_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
         self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
@@ -175,7 +179,7 @@ class DiagramApp:
                 x1 + 6,
                 y1 + 6,
                 text=node.name,
-                font=("Arial", node.label_font_size, "bold"),
+                font=(node.label_font_family, node.label_font_size, node.label_font_weight),
                 anchor="nw",
             )
             node.items.append(label)
@@ -959,55 +963,7 @@ class DiagramApp:
             port.manual_y = None
             y = y1 if port.side == "top" else y2
             self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
-        self._snap_port_to_connection(node, port)
         self._update_connections()
-
-    def _snap_port_to_connection(self, node: Node, port: Port, threshold: float = 5.0):
-        if port.canvas_id is None:
-            return
-        for connection in self.connections:
-            other = None
-            if connection.src == (node.name, port.name) and connection.dst:
-                other = connection.dst
-            elif connection.dst == (node.name, port.name) and connection.src:
-                other = connection.src
-            if not other:
-                continue
-            other_id = self._get_port_canvas_id(other[0], other[1], None)
-            if not other_id:
-                continue
-            x1, y1 = self._port_center(port.canvas_id)
-            x2, y2 = self._port_center(other_id)
-            if port.side in ("left", "right") and abs(y1 - y2) <= threshold:
-                self._move_port_to(node, port, x1, y2)
-            if port.side in ("top", "bottom") and abs(x1 - x2) <= threshold:
-                self._move_port_to(node, port, x2, y1)
-            break
-
-    def _move_port_to(self, node: Node, port: Port, target_x: float, target_y: float):
-        if port.canvas_id is None:
-            return
-        x1, y1 = node.x, node.y
-        x2, y2 = node.x + node.width, node.y + node.height
-        radius = self.PORT_RADIUS
-        if port.side in ("left", "right"):
-            min_y = y1 + radius
-            max_y = y2 - radius
-            new_y = max(min_y, min(target_y, max_y))
-            new_y = self._snap_value(new_y, int(min_y))
-            port.offset = 0 if y2 == y1 else (new_y - y1) / (y2 - y1)
-            port.manual_y = new_y
-            x = x1 if port.side == "left" else x2
-            self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
-        else:
-            min_x = x1 + radius
-            max_x = x2 - radius
-            new_x = max(min_x, min(target_x, max_x))
-            new_x = self._snap_value(new_x, int(min_x))
-            port.offset = 0 if x2 == x1 else (new_x - x1) / (x2 - x1)
-            port.manual_y = None
-            y = y1 if port.side == "top" else y2
-            self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
 
     def _on_port_press(self, event):
         if self._mode == "delete_port":
@@ -1048,15 +1004,27 @@ class DiagramApp:
             return
 
     def _open_new_block(self):
+        self._open_block_dialog(mode="create")
+
+    def _open_edit_block(self):
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node or node.kind != "BLOCK":
+            return
+        self._open_block_dialog(mode="edit", node=node)
+
+    def _open_block_dialog(self, mode: str, node: Node | None = None):
         window = tk.Toplevel(self.root)
-        window.title("New")
+        window.title("Edit" if mode == "edit" else "New")
         mode_var = tk.StringVar(value="block")
-        tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
-            row=0, column=0, padx=6, pady=6, sticky="w"
-        )
-        tk.Radiobutton(window, text="Gate", variable=mode_var, value="gate").grid(
-            row=0, column=1, padx=6, pady=6, sticky="w"
-        )
+        if mode == "create":
+            tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
+                row=0, column=0, padx=6, pady=6, sticky="w"
+            )
+            tk.Radiobutton(window, text="Gate", variable=mode_var, value="gate").grid(
+                row=0, column=1, padx=6, pady=6, sticky="w"
+            )
 
         block_frame = tk.Frame(window)
         block_frame.grid(row=1, column=0, columnspan=2, sticky="w")
@@ -1070,26 +1038,35 @@ class DiagramApp:
         font_size_var = tk.IntVar(value=12)
         font_size_spin = tk.Spinbox(block_frame, from_=6, to=72, textvariable=font_size_var, width=6)
         font_size_spin.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Font").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        font_family_var = tk.StringVar(value="Arial")
+        font_menu = tk.OptionMenu(block_frame, font_family_var, "Arial", "Malgun Gothic")
+        font_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        bold_var = tk.BooleanVar(value=True)
+        bold_check = tk.Checkbutton(block_frame, text="Bold", variable=bold_var)
+        bold_check.grid(row=3, column=1, padx=6, pady=6, sticky="w")
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
         fill_var = tk.StringVar(value="GRAY")
-        tk.Label(block_frame, text="Fill Color").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Fill Color").grid(row=4, column=0, padx=6, pady=6, sticky="w")
         fill_menu = tk.OptionMenu(block_frame, fill_var, *color_options)
-        fill_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        fill_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
 
         outline_enabled_var = tk.BooleanVar(value=True)
-        outline_check = tk.Checkbutton(block_frame, text="Outline", variable=outline_enabled_var)
-        outline_check.grid(row=3, column=0, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline").grid(row=5, column=0, padx=6, pady=6, sticky="w")
+        outline_check = tk.Checkbutton(block_frame, variable=outline_enabled_var)
+        outline_check.grid(row=5, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline Color").grid(row=6, column=0, padx=6, pady=6, sticky="w")
         outline_var = tk.StringVar(value="GRAY")
         outline_menu = tk.OptionMenu(block_frame, outline_var, *color_options)
-        outline_menu.grid(row=3, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Outline Thickness").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        outline_menu.grid(row=6, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline Thickness").grid(row=7, column=0, padx=6, pady=6, sticky="w")
         outline_thickness_var = tk.StringVar(value="Normal")
         outline_thickness_menu = tk.OptionMenu(block_frame, outline_thickness_var, "Thin", "Normal", "Thick")
-        outline_thickness_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Outline Style").grid(row=5, column=0, padx=6, pady=6, sticky="w")
+        outline_thickness_menu.grid(row=7, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline Style").grid(row=8, column=0, padx=6, pady=6, sticky="w")
         outline_style_var = tk.StringVar(value="Solid")
         outline_style_menu = tk.OptionMenu(block_frame, outline_style_var, "Solid", "Dashed")
-        outline_style_menu.grid(row=5, column=1, padx=6, pady=6, sticky="w")
+        outline_style_menu.grid(row=8, column=1, padx=6, pady=6, sticky="w")
 
         tk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
         gate_var = tk.StringVar(value="AND2")
@@ -1111,9 +1088,13 @@ class DiagramApp:
                 gate_frame.grid_remove()
                 block_frame.grid()
 
-        mode_var.trace_add("write", _toggle_fields)
+        if mode == "create":
+            mode_var.trace_add("write", _toggle_fields)
+            _toggle_fields()
+        else:
+            gate_frame.grid_remove()
+
         outline_enabled_var.trace_add("write", _toggle_outline_fields)
-        _toggle_fields()
         _toggle_outline_fields()
 
         def _unique_gate_name(kind: str) -> str:
@@ -1124,8 +1105,33 @@ class DiagramApp:
                     return candidate
                 index += 1
 
-        def _create_block():
-            if mode_var.get() == "gate":
+        if node:
+            name_entry.insert("1.0", node.name)
+            font_size_var.set(node.label_font_size)
+            font_family_var.set(node.label_font_family)
+            bold_var.set(node.label_font_weight == "bold")
+            fill_var.set(self._color_to_name(node.fill_color))
+            outline_var.set(self._color_to_name(node.outline_color))
+            outline_enabled_var.set(node.outline_enabled)
+            thickness_map = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
+            outline_thickness_var.set(thickness_map.get(node.outline_scale, "Normal"))
+            outline_style_var.set("Dashed" if node.outline_style == "dashed" else "Solid")
+
+        def _apply_block_changes(target: Node, new_name: str):
+            target.name = new_name
+            target.label_font_size = font_size_var.get()
+            target.label_font_family = font_family_var.get()
+            target.label_font_weight = "bold" if bold_var.get() else "normal"
+            target.fill_color = self._color_to_hex(fill_var.get())
+            target.outline_color = self._color_to_hex(outline_var.get())
+            thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
+            target.outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
+            target.outline_style = "dashed" if outline_style_var.get() == "Dashed" else "solid"
+            target.outline_enabled = outline_enabled_var.get()
+            self._redraw_node(target)
+
+        def _create_or_edit():
+            if mode == "create" and mode_var.get() == "gate":
                 gate_kind = gate_var.get()
                 name = _unique_gate_name(gate_kind)
                 gate_def = self._gate_definitions()[gate_kind]
@@ -1136,7 +1142,7 @@ class DiagramApp:
                 width = gate_def["width"]
                 height = gate_def["height"]
                 x, y = self._next_block_position()
-                node = Node(
+                new_node = Node(
                     name=name,
                     kind=gate_kind,
                     inputs=inputs,
@@ -1152,45 +1158,62 @@ class DiagramApp:
                     outline_style="solid",
                     outline_scale=1.0,
                     label_font_size=12,
+                    label_font_family="Arial",
+                    label_font_weight="bold",
                     level=self._next_level(),
                 )
-            else:
-                name = name_entry.get("1.0", "end-1c").strip()
-                if not name or name in self.nodes:
+                self.nodes[name] = new_node
+                self._draw_node(new_node)
+                self._apply_z_order(active_node_name=new_node.name)
+                window.destroy()
+                return
+
+            new_name = name_entry.get("1.0", "end-1c").strip()
+            if not new_name:
+                return
+            if mode == "create":
+                if new_name in self.nodes:
                     return
-                inputs = []
-                outputs = []
-                base_height = 100
                 x, y = self._next_block_position()
-                fill_color = self._color_to_hex(fill_var.get())
-                outline_color = self._color_to_hex(outline_var.get())
-                thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
-                outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
-                outline_style = "dashed" if outline_style_var.get() == "Dashed" else "solid"
-                node = Node(
-                    name=name,
+                new_node = Node(
+                    name=new_name,
                     kind="BLOCK",
-                    inputs=inputs,
-                    outputs=outputs,
+                    inputs=[],
+                    outputs=[],
                     x=x,
                     y=y,
                     width=160,
-                    height=base_height,
-                    base_height=base_height,
-                    fill_color=fill_color,
-                    outline_color=outline_color,
-                    outline_enabled=outline_enabled_var.get(),
-                    outline_style=outline_style,
-                    outline_scale=outline_scale,
-                    label_font_size=font_size_var.get(),
+                    height=100,
+                    base_height=100,
                     level=self._next_level(),
                 )
-            self.nodes[name] = node
-            self._draw_node(node)
-            self._apply_z_order(active_node_name=node.name)
-            window.destroy()
+                self.nodes[new_name] = new_node
+                _apply_block_changes(new_node, new_name)
+                self._apply_z_order(active_node_name=new_node.name)
+                window.destroy()
+                return
+            if node and new_name != node.name and new_name in self.nodes:
+                return
+            if node:
+                old_name = node.name
+                _apply_block_changes(node, new_name)
+                if new_name != old_name:
+                    self._rename_node(old_name, new_name)
+                self._apply_z_order(active_node_name=node.name)
+                window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=2, column=0, columnspan=3, pady=8)
+        tk.Button(window, text="Create", command=_create_or_edit).grid(row=2, column=0, columnspan=3, pady=8)
+
+    def _rename_node(self, old_name: str, new_name: str):
+        node = self.nodes.pop(old_name)
+        node.name = new_name
+        self.nodes[new_name] = node
+        for connection in self.connections:
+            if connection.src and connection.src[0] == old_name:
+                connection.src = (new_name, connection.src[1])
+            if connection.dst and connection.dst[0] == old_name:
+                connection.dst = (new_name, connection.dst[1])
+        self._redraw_node(node)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -1450,24 +1473,26 @@ class DiagramApp:
                     "offset": port.offset,
                     "manual_y": _unscale(port.manual_y),
                 }
-            blocks.append(
-                {
-                    "name": node.name,
-                    "kind": node.kind,
-                    "ports": ports,
-                    "x": _unscale(node.x),
-                    "y": _unscale(node.y),
-                    "width": _unscale(node.width),
-                    "height": _unscale(node.height),
-                    "level": node.level,
-                    "fill_color": self._color_to_name(node.fill_color),
-                    "outline_color": self._color_to_name(node.outline_color),
-                    "outline_enabled": node.outline_enabled,
-                    "outline_thickness": node.outline_scale,
-                    "outline_style": node.outline_style,
-                    "font_size": node.label_font_size,
-                }
-            )
+        blocks.append(
+            {
+                "name": node.name,
+                "kind": node.kind,
+                "ports": ports,
+                "x": _unscale(node.x),
+                "y": _unscale(node.y),
+                "width": _unscale(node.width),
+                "height": _unscale(node.height),
+                "level": node.level,
+                "fill_color": self._color_to_name(node.fill_color),
+                "outline_color": self._color_to_name(node.outline_color),
+                "outline_enabled": node.outline_enabled,
+                "outline_thickness": node.outline_scale,
+                "outline_style": node.outline_style,
+                "font_size": node.label_font_size,
+                "font_family": node.label_font_family,
+                "font_weight": node.label_font_weight,
+            }
+        )
         blocks.sort(key=lambda block: block["level"])
         connections = []
         wires = []
@@ -1761,6 +1786,8 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
         outline_scale = float(block.get("outline_thickness", 1.0))
         outline_style = str(block.get("outline_style", "solid"))
         font_size = int(block.get("font_size", 12))
+        font_family = str(block.get("font_family", "Arial"))
+        font_weight = str(block.get("font_weight", "bold"))
         node = Node(
             name=name,
             kind=kind,
@@ -1777,6 +1804,8 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
             outline_style=outline_style,
             outline_scale=outline_scale,
             label_font_size=font_size,
+            label_font_family=font_family,
+            label_font_weight=font_weight,
             level=int(level) if level is not None else 0,
         )
         nodes[name] = node

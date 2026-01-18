@@ -14,6 +14,8 @@
       "outline_thickness": 1.0,
       "outline_style": "solid",
       "font_size": 12,
+      "font_family": "Arial",
+      "font_weight": "bold",
       "ports": {
         "in1": {
           "side": "left",
@@ -39,6 +41,8 @@
       "outline_thickness": 1.0,
       "outline_style": "solid",
       "font_size": 12,
+      "font_family": "Arial",
+      "font_weight": "bold",
       "ports": {
         "in1": {
           "side": "left",
@@ -64,6 +68,8 @@
       "outline_thickness": 1.0,
       "outline_style": "solid",
       "font_size": 12,
+      "font_family": "Arial",
+      "font_weight": "bold",
       "ports": {
         "in1": {
           "side": "left",
@@ -89,6 +95,8 @@
       "outline_thickness": 1.0,
       "outline_style": "solid",
       "font_size": 12,
+      "font_family": "Arial",
+      "font_weight": "bold",
       "ports": {
         "in1": {
           "side": "left",

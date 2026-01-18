@@ -30,7 +30,7 @@ DISCONNECT 버튼은 연결선을 빨간색으로 표시하고, 선택한 연결
 SHOW/HIDE PORT 버튼으로 포트 점 표시를 켜거나 끌 수 있습니다.
 WIRE NAME 버튼은 연결선을 파란색으로 표시하고, 선택한 연결선에 이름을 입력합니다.
 BRING FRONT/SEND BACK 버튼으로 선택한 블록/게이트의 level을 이웃 level과 교환합니다.
-SAVE 버튼을 누르면 현재 블록/배선 정보가 `input.json`에 저장됩니다.
+JSON SAVE 버튼을 누르면 현재 블록/배선 정보가 `input.json`에 저장됩니다.
 ZOOM IN/OUT 버튼으로 화면만 확대/축소합니다.
 CONNECT/DISCONNECT 모드에서는 블록 이동, 크기 조절, 포트 이동이 비활성화됩니다.
 
@@ -66,6 +66,8 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
       "outline_thickness": 1.0,
       "outline_style": "solid",
       "font_size": 12,
+      "font_family": "Arial",
+      "font_weight": "bold",
       "ports": {
         "p1": {
           "side": "left",
@@ -104,5 +106,6 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
 `outline_thickness`는 0.5(Thin)/1.0(Normal)/2.0(Thick)로 저장됩니다.
 `outline_style`은 `solid` 또는 `dashed`를 사용합니다.
 `font_size`는 블록 이름 글꼴 크기를 의미합니다.
+`font_family`는 `Arial` 또는 `Malgun Gothic`을 선택할 수 있고, `font_weight`는 `bold` 또는 `normal`입니다.
 연결에 사용되지 않은 포트가 있으면 `error.log`에 기록됩니다.
 포트 이동은 10 단위로 스냅됩니다.
