@@ -31,8 +31,12 @@ class Node:
     base_height: int = 100
     items: list[int] = field(default_factory=list)
     resize_enabled: bool = False
-    outline_color: str = "#666666"
+    outline_color: str = "#BBBBBB"
     fill_color: str = "#e0e0e0"
+    outline_enabled: bool = True
+    outline_style: str = "solid"
+    outline_scale: float = 1.0
+    label_font_size: int = 12
     level: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
@@ -54,7 +58,7 @@ class DiagramApp:
     MID_STEP = 5
     PORT_RADIUS = 5
     COLOR_NAME_TO_HEX = {
-        "GRAY": "#666666",
+        "GRAY": "#BBBBBB",
         "BLUE": "blue",
         "RED": "red",
         "GREEN": "green",
@@ -115,6 +119,7 @@ class DiagramApp:
         self._active_node_name: str | None = None
         self._gate_images: dict[str, tk.PhotoImage] = {}
         self._zoom_scale = 1.0
+        self._outline_backup: dict[str, str] = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -149,15 +154,20 @@ class DiagramApp:
             else:
                 node.items.extend(self._draw_gate_shape(node, x1, y1, x2, y2))
         else:
-            outline_width = 4 if node.resize_enabled else 2
+            base_width = 4 if node.resize_enabled else 2
+            outline_width = max(1, base_width * node.outline_scale)
+            dash = (4, 2) if node.outline_style == "dashed" else None
+            outline = node.outline_color if node.outline_enabled else ""
+            width = outline_width if node.outline_enabled else 0
             rect = self.canvas.create_rectangle(
                 x1,
                 y1,
                 x2,
                 y2,
                 fill=node.fill_color,
-                outline=node.outline_color,
-                width=outline_width,
+                outline=outline,
+                width=width,
+                dash=dash,
             )
             node.items.append(rect)
         if node.kind == "BLOCK":
@@ -165,7 +175,7 @@ class DiagramApp:
                 x1 + 6,
                 y1 + 6,
                 text=node.name,
-                font=("Arial", 12, "bold"),
+                font=("Arial", node.label_font_size, "bold"),
                 anchor="nw",
             )
             node.items.append(label)
@@ -926,6 +936,8 @@ class DiagramApp:
     def _move_port(self, node: Node, port: Port, target_x: float, target_y: float):
         if port.canvas_id is None:
             return
+        if node.kind != "BLOCK":
+            return
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         radius = self.PORT_RADIUS
@@ -947,7 +959,55 @@ class DiagramApp:
             port.manual_y = None
             y = y1 if port.side == "top" else y2
             self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
+        self._snap_port_to_connection(node, port)
         self._update_connections()
+
+    def _snap_port_to_connection(self, node: Node, port: Port, threshold: float = 5.0):
+        if port.canvas_id is None:
+            return
+        for connection in self.connections:
+            other = None
+            if connection.src == (node.name, port.name) and connection.dst:
+                other = connection.dst
+            elif connection.dst == (node.name, port.name) and connection.src:
+                other = connection.src
+            if not other:
+                continue
+            other_id = self._get_port_canvas_id(other[0], other[1], None)
+            if not other_id:
+                continue
+            x1, y1 = self._port_center(port.canvas_id)
+            x2, y2 = self._port_center(other_id)
+            if port.side in ("left", "right") and abs(y1 - y2) <= threshold:
+                self._move_port_to(node, port, x1, y2)
+            if port.side in ("top", "bottom") and abs(x1 - x2) <= threshold:
+                self._move_port_to(node, port, x2, y1)
+            break
+
+    def _move_port_to(self, node: Node, port: Port, target_x: float, target_y: float):
+        if port.canvas_id is None:
+            return
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        radius = self.PORT_RADIUS
+        if port.side in ("left", "right"):
+            min_y = y1 + radius
+            max_y = y2 - radius
+            new_y = max(min_y, min(target_y, max_y))
+            new_y = self._snap_value(new_y, int(min_y))
+            port.offset = 0 if y2 == y1 else (new_y - y1) / (y2 - y1)
+            port.manual_y = new_y
+            x = x1 if port.side == "left" else x2
+            self.canvas.coords(port.canvas_id, x - radius, new_y - radius, x + radius, new_y + radius)
+        else:
+            min_x = x1 + radius
+            max_x = x2 - radius
+            new_x = max(min_x, min(target_x, max_x))
+            new_x = self._snap_value(new_x, int(min_x))
+            port.offset = 0 if x2 == x1 else (new_x - x1) / (x2 - x1)
+            port.manual_y = None
+            y = y1 if port.side == "top" else y2
+            self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
 
     def _on_port_press(self, event):
         if self._mode == "delete_port":
@@ -998,35 +1058,63 @@ class DiagramApp:
             row=0, column=1, padx=6, pady=6, sticky="w"
         )
 
-        tk.Label(window, text="Name").grid(row=1, column=0, padx=6, pady=6, sticky="w")
-        name_entry = tk.Entry(window)
-        name_entry.grid(row=1, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(window, text="Gate Type").grid(row=2, column=0, padx=6, pady=6, sticky="w")
-        gate_var = tk.StringVar(value="AND2")
-        gate_menu = tk.OptionMenu(window, gate_var, *self._gate_types())
-        gate_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        block_frame = tk.Frame(window)
+        block_frame.grid(row=1, column=0, columnspan=2, sticky="w")
+        gate_frame = tk.Frame(window)
+        gate_frame.grid(row=1, column=0, columnspan=2, sticky="w")
+
+        tk.Label(block_frame, text="Name").grid(row=0, column=0, padx=6, pady=6, sticky="nw")
+        name_entry = tk.Text(block_frame, height=5, width=24)
+        name_entry.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Font Size").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        font_size_var = tk.IntVar(value=12)
+        font_size_spin = tk.Spinbox(block_frame, from_=6, to=72, textvariable=font_size_var, width=6)
+        font_size_spin.grid(row=1, column=1, padx=6, pady=6, sticky="w")
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
         fill_var = tk.StringVar(value="GRAY")
+        tk.Label(block_frame, text="Fill Color").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        fill_menu = tk.OptionMenu(block_frame, fill_var, *color_options)
+        fill_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+
+        outline_enabled_var = tk.BooleanVar(value=True)
+        outline_check = tk.Checkbutton(block_frame, text="Outline", variable=outline_enabled_var)
+        outline_check.grid(row=3, column=0, padx=6, pady=6, sticky="w")
         outline_var = tk.StringVar(value="GRAY")
-        tk.Label(window, text="Fill Color").grid(row=3, column=0, padx=6, pady=6, sticky="w")
-        fill_menu = tk.OptionMenu(window, fill_var, *color_options)
-        fill_menu.grid(row=3, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(window, text="Outline Color").grid(row=4, column=0, padx=6, pady=6, sticky="w")
-        outline_menu = tk.OptionMenu(window, outline_var, *color_options)
-        outline_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
+        outline_menu = tk.OptionMenu(block_frame, outline_var, *color_options)
+        outline_menu.grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline Thickness").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        outline_thickness_var = tk.StringVar(value="Normal")
+        outline_thickness_menu = tk.OptionMenu(block_frame, outline_thickness_var, "Thin", "Normal", "Thick")
+        outline_thickness_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Outline Style").grid(row=5, column=0, padx=6, pady=6, sticky="w")
+        outline_style_var = tk.StringVar(value="Solid")
+        outline_style_menu = tk.OptionMenu(block_frame, outline_style_var, "Solid", "Dashed")
+        outline_style_menu.grid(row=5, column=1, padx=6, pady=6, sticky="w")
+
+        tk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        gate_var = tk.StringVar(value="AND2")
+        gate_menu = tk.OptionMenu(gate_frame, gate_var, *self._gate_types())
+        gate_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+
+        def _toggle_outline_fields(*_args):
+            state = "normal" if outline_enabled_var.get() else "disabled"
+            outline_menu.configure(state=state)
+            outline_thickness_menu.configure(state=state)
+            outline_style_menu.configure(state=state)
 
         def _toggle_fields(*_args):
             is_gate = mode_var.get() == "gate"
-            state_name = "disabled" if is_gate else "normal"
-            state_gate = "normal" if is_gate else "disabled"
-            name_entry.configure(state=state_name)
-            gate_menu.configure(state=state_gate)
-            color_state = "disabled" if is_gate else "normal"
-            fill_menu.configure(state=color_state)
-            outline_menu.configure(state=color_state)
+            if is_gate:
+                block_frame.grid_remove()
+                gate_frame.grid()
+            else:
+                gate_frame.grid_remove()
+                block_frame.grid()
 
         mode_var.trace_add("write", _toggle_fields)
+        outline_enabled_var.trace_add("write", _toggle_outline_fields)
         _toggle_fields()
+        _toggle_outline_fields()
 
         def _unique_gate_name(kind: str) -> str:
             index = 1
@@ -1059,11 +1147,15 @@ class DiagramApp:
                     height=height,
                     base_height=height,
                     fill_color="#e0e0e0",
-                    outline_color="#666666",
+                    outline_color=self._color_to_hex("GRAY"),
+                    outline_enabled=True,
+                    outline_style="solid",
+                    outline_scale=1.0,
+                    label_font_size=12,
                     level=self._next_level(),
                 )
             else:
-                name = name_entry.get().strip()
+                name = name_entry.get("1.0", "end-1c").strip()
                 if not name or name in self.nodes:
                     return
                 inputs = []
@@ -1072,6 +1164,9 @@ class DiagramApp:
                 x, y = self._next_block_position()
                 fill_color = self._color_to_hex(fill_var.get())
                 outline_color = self._color_to_hex(outline_var.get())
+                thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
+                outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
+                outline_style = "dashed" if outline_style_var.get() == "Dashed" else "solid"
                 node = Node(
                     name=name,
                     kind="BLOCK",
@@ -1084,6 +1179,10 @@ class DiagramApp:
                     base_height=base_height,
                     fill_color=fill_color,
                     outline_color=outline_color,
+                    outline_enabled=outline_enabled_var.get(),
+                    outline_style=outline_style,
+                    outline_scale=outline_scale,
+                    label_font_size=font_size_var.get(),
                     level=self._next_level(),
                 )
             self.nodes[name] = node
@@ -1091,7 +1190,7 @@ class DiagramApp:
             self._apply_z_order(active_node_name=node.name)
             window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=5, column=0, columnspan=3, pady=8)
+        tk.Button(window, text="Create", command=_create_block).grid(row=2, column=0, columnspan=3, pady=8)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -1187,6 +1286,7 @@ class DiagramApp:
         self._mode = "create_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
+            self._outline_backup.setdefault(node.name, node.outline_color)
             node.outline_color = "green"
             node.resize_enabled = True
             self._redraw_node(node)
@@ -1204,6 +1304,7 @@ class DiagramApp:
         self._mode = "delete_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
+            self._outline_backup.setdefault(node.name, node.outline_color)
             node.resize_enabled = True
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, "red")
@@ -1228,7 +1329,7 @@ class DiagramApp:
         if self._mode == "create_port" and self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node:
-                node.outline_color = "#666666"
+                node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
                 node.resize_enabled = False
                 self._redraw_node(node)
         if self._mode == "delete_port" and self._active_node_name:
@@ -1237,6 +1338,7 @@ class DiagramApp:
                 for port in node.inputs + node.outputs:
                     self._set_port_color(port, "black")
                 node.resize_enabled = False
+                node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
                 self._redraw_node(node)
         if self._mode == "wire_name":
             self._set_all_wire_colors("#333333")
@@ -1255,7 +1357,7 @@ class DiagramApp:
         offset = self._edge_offset(node, edge, event.x, event.y)
         port = Port(name=port_name, kind="io", side=edge, offset=offset)
         node.inputs.append(port)
-        node.outline_color = "#666666"
+        node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
         node.resize_enabled = False
         self._redraw_node(node)
         self._mode = "normal"
@@ -1360,6 +1462,10 @@ class DiagramApp:
                     "level": node.level,
                     "fill_color": self._color_to_name(node.fill_color),
                     "outline_color": self._color_to_name(node.outline_color),
+                    "outline_enabled": node.outline_enabled,
+                    "outline_thickness": node.outline_scale,
+                    "outline_style": node.outline_style,
+                    "font_size": node.label_font_size,
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -1651,6 +1757,10 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
         outline_raw = block.get("outline_color", block.get("color", "GRAY"))
         fill_color = DiagramApp._color_to_hex(str(fill_raw))
         outline_color = DiagramApp._color_to_hex(str(outline_raw))
+        outline_enabled = bool(block.get("outline_enabled", True))
+        outline_scale = float(block.get("outline_thickness", 1.0))
+        outline_style = str(block.get("outline_style", "solid"))
+        font_size = int(block.get("font_size", 12))
         node = Node(
             name=name,
             kind=kind,
@@ -1663,6 +1773,10 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
             base_height=height,
             outline_color=outline_color,
             fill_color=fill_color,
+            outline_enabled=outline_enabled,
+            outline_style=outline_style,
+            outline_scale=outline_scale,
+            label_font_size=font_size,
             level=int(level) if level is not None else 0,
         )
         nodes[name] = node

@@ -10,6 +10,10 @@
       "level": 0,
       "fill_color": "WHITE",
       "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
       "ports": {
         "in1": {
           "side": "left",
@@ -31,6 +35,10 @@
       "level": 1,
       "fill_color": "WHITE",
       "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
       "ports": {
         "in1": {
           "side": "left",
@@ -52,6 +60,10 @@
       "level": 2,
       "fill_color": "WHITE",
       "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
       "ports": {
         "in1": {
           "side": "left",
@@ -73,6 +85,10 @@
       "level": 3,
       "fill_color": "WHITE",
       "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
       "ports": {
         "in1": {
           "side": "left",

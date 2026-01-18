@@ -11,7 +11,7 @@ Tkinter 창에서 블록을 드래그하면 연결선도 함께 이동합니다.
 AND 게이트는 캔버스에 직접 그리는 D형(직선+반원) 형태이며 내부 구분선은 없습니다.
 AND 게이트의 in/out 포트는 도형 중심선을 기준으로 배치됩니다.
 포트 이름 텍스트는 표시하지 않으며 포트 점은 반지름 5의 검정색으로 표시됩니다.
-블록 내부 색상은 연한 회색으로 표시됩니다.
+블록 내부 색상은 선택한 fill_color로 표시됩니다.
 블록을 더블클릭하면 테두리가 두꺼워지며, 이 상태에서 테두리를 드래그해 크기를 조절합니다.
 드래그 중에 마우스를 떼는 위치까지 크기가 변경됩니다.
 다시 더블클릭하면 테두리가 원래 두께로 돌아가며 크기 조절이 비활성화됩니다.
@@ -62,6 +62,10 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
       "level": 0,
       "fill_color": "WHITE",
       "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
       "ports": {
         "p1": {
           "side": "left",
@@ -96,5 +100,9 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
 `wires`에는 연결선의 꺾임 지점(`manual_mid_x`, `manual_mid_y`)과 같은 시각적 정보를 저장합니다.
 포트 위치를 고정하려면 `ports` 아래에 각 포트 이름을 키로 두고 `side`, `offset`, `manual_y`를 지정합니다.
 `fill_color`/`outline_color`에는 `GRAY`, `BLUE`, `RED`, `WHITE`처럼 이름 문자열을 넣으면 해당 색상이 적용됩니다.
+`outline_enabled`를 false로 두면 테두리가 그려지지 않습니다.
+`outline_thickness`는 0.5(Thin)/1.0(Normal)/2.0(Thick)로 저장됩니다.
+`outline_style`은 `solid` 또는 `dashed`를 사용합니다.
+`font_size`는 블록 이름 글꼴 크기를 의미합니다.
 연결에 사용되지 않은 포트가 있으면 `error.log`에 기록됩니다.
 포트 이동은 10 단위로 스냅됩니다.
