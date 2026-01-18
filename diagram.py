@@ -144,6 +144,13 @@ class DiagramApp:
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
         self.root.bind("s", lambda _event: self.save_diagram(self.output_path))
+        self.root.bind("i", lambda _event: self._open_new_block())
+        self.root.bind("q", lambda _event: self._open_edit_block())
+        self.root.bind("<Delete>", lambda _event: self._remove_active_node())
+        self.root.bind("<Control-s>", lambda _event: self._save_json())
+        self.root.bind("w", lambda _event: self._toggle_connect_mode())
+        self.root.bind("p", lambda _event: self._toggle_create_port_mode())
+        self.root.bind("l", lambda _event: self._toggle_wire_name_mode())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
 
     def _draw_node(self, node: Node):
@@ -1629,22 +1636,22 @@ class DiagramApp:
                     "offset": port.offset,
                     "manual_y": _unscale(port.manual_y),
                 }
-        blocks.append(
-            {
-                "name": node.name,
-                "kind": node.kind,
-                "ports": ports,
-                "x": _unscale(node.x),
-                "y": _unscale(node.y),
-                "width": _unscale(node.width),
-                "height": _unscale(node.height),
-                "level": node.level,
-                "fill_color": self._color_to_name(node.fill_color),
-                "outline_color": self._color_to_name(node.outline_color),
-                "outline_enabled": node.outline_enabled,
-                "outline_thickness": node.outline_scale,
-                "outline_style": node.outline_style,
-                "font_size": node.label_font_size,
+            blocks.append(
+                {
+                    "name": node.name,
+                    "kind": node.kind,
+                    "ports": ports,
+                    "x": _unscale(node.x),
+                    "y": _unscale(node.y),
+                    "width": _unscale(node.width),
+                    "height": _unscale(node.height),
+                    "level": node.level,
+                    "fill_color": self._color_to_name(node.fill_color),
+                    "outline_color": self._color_to_name(node.outline_color),
+                    "outline_enabled": node.outline_enabled,
+                    "outline_thickness": node.outline_scale,
+                    "outline_style": node.outline_style,
+                    "font_size": node.label_font_size,
                     "font_family": node.label_font_family,
                     "font_weight": node.label_font_weight,
                 }
