@@ -32,6 +32,7 @@ class Node:
     items: list[int] = field(default_factory=list)
     resize_enabled: bool = False
     outline_color: str = "#666666"
+    fill_color: str = "#e0e0e0"
     level: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
@@ -59,6 +60,7 @@ class DiagramApp:
         "GREEN": "green",
         "BLACK": "black",
         "YELLOW": "yellow",
+        "WHITE": "white",
     }
     COLOR_HEX_TO_NAME = {value.lower(): key for key, value in COLOR_NAME_TO_HEX.items()}
 
@@ -97,6 +99,10 @@ class DiagramApp:
         self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
         self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.zoom_in_button = tk.Button(self.toolbar, text="ZOOM IN", command=self._zoom_in)
+        self.zoom_in_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.zoom_out_button = tk.Button(self.toolbar, text="ZOOM OUT", command=self._zoom_out)
+        self.zoom_out_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
@@ -108,6 +114,7 @@ class DiagramApp:
         self._selected_ports: list[tuple[str, str]] = []
         self._active_node_name: str | None = None
         self._gate_images: dict[str, tk.PhotoImage] = {}
+        self._zoom_scale = 1.0
         self._build_ui()
 
     def _build_ui(self):
@@ -148,7 +155,7 @@ class DiagramApp:
                 y1,
                 x2,
                 y2,
-                fill="#e0e0e0",
+                fill=node.fill_color,
                 outline=node.outline_color,
                 width=outline_width,
             )
@@ -998,6 +1005,15 @@ class DiagramApp:
         gate_var = tk.StringVar(value="AND2")
         gate_menu = tk.OptionMenu(window, gate_var, *self._gate_types())
         gate_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
+        color_options = list(self.COLOR_NAME_TO_HEX.keys())
+        fill_var = tk.StringVar(value="GRAY")
+        outline_var = tk.StringVar(value="GRAY")
+        tk.Label(window, text="Fill Color").grid(row=3, column=0, padx=6, pady=6, sticky="w")
+        fill_menu = tk.OptionMenu(window, fill_var, *color_options)
+        fill_menu.grid(row=3, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(window, text="Outline Color").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        outline_menu = tk.OptionMenu(window, outline_var, *color_options)
+        outline_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
 
         def _toggle_fields(*_args):
             is_gate = mode_var.get() == "gate"
@@ -1005,6 +1021,9 @@ class DiagramApp:
             state_gate = "normal" if is_gate else "disabled"
             name_entry.configure(state=state_name)
             gate_menu.configure(state=state_gate)
+            color_state = "disabled" if is_gate else "normal"
+            fill_menu.configure(state=color_state)
+            outline_menu.configure(state=color_state)
 
         mode_var.trace_add("write", _toggle_fields)
         _toggle_fields()
@@ -1039,6 +1058,8 @@ class DiagramApp:
                     width=width,
                     height=height,
                     base_height=height,
+                    fill_color="#e0e0e0",
+                    outline_color="#666666",
                     level=self._next_level(),
                 )
             else:
@@ -1049,6 +1070,8 @@ class DiagramApp:
                 outputs = []
                 base_height = 100
                 x, y = self._next_block_position()
+                fill_color = self._color_to_hex(fill_var.get())
+                outline_color = self._color_to_hex(outline_var.get())
                 node = Node(
                     name=name,
                     kind="BLOCK",
@@ -1059,6 +1082,8 @@ class DiagramApp:
                     width=160,
                     height=base_height,
                     base_height=base_height,
+                    fill_color=fill_color,
+                    outline_color=outline_color,
                     level=self._next_level(),
                 )
             self.nodes[name] = node
@@ -1066,7 +1091,7 @@ class DiagramApp:
             self._apply_z_order(active_node_name=node.name)
             window.destroy()
 
-        tk.Button(window, text="Create", command=_create_block).grid(row=3, column=0, columnspan=3, pady=8)
+        tk.Button(window, text="Create", command=_create_block).grid(row=5, column=0, columnspan=3, pady=8)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -1280,7 +1305,40 @@ class DiagramApp:
         node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
 
+    def _apply_zoom(self, factor: float):
+        if factor == 1.0:
+            return
+        self._zoom_scale *= factor
+        for node in self.nodes.values():
+            node.x *= factor
+            node.y *= factor
+            node.width *= factor
+            node.height *= factor
+            node.base_height *= factor
+            for port in node.inputs + node.outputs:
+                if port.manual_y is not None:
+                    port.manual_y *= factor
+        for connection in self.connections:
+            if connection.manual_mid_x is not None:
+                connection.manual_mid_x *= factor
+            if connection.manual_mid_y is not None:
+                connection.manual_mid_y *= factor
+        for node in self.nodes.values():
+            self._redraw_node(node)
+        self._update_connections()
+
+    def _zoom_in(self):
+        self._apply_zoom(1.1)
+
+    def _zoom_out(self):
+        self._apply_zoom(0.9)
+
     def _save_json(self):
+        def _unscale(value: float | None) -> float | None:
+            if value is None:
+                return None
+            return round(value / self._zoom_scale, 2)
+
         blocks = []
         for node in self.nodes.values():
             ports = {}
@@ -1288,19 +1346,20 @@ class DiagramApp:
                 ports[port.name] = {
                     "side": port.side,
                     "offset": port.offset,
-                    "manual_y": port.manual_y,
+                    "manual_y": _unscale(port.manual_y),
                 }
             blocks.append(
                 {
                     "name": node.name,
                     "kind": node.kind,
                     "ports": ports,
-                    "x": node.x,
-                    "y": node.y,
-                    "width": node.width,
-                    "height": node.height,
+                    "x": _unscale(node.x),
+                    "y": _unscale(node.y),
+                    "width": _unscale(node.width),
+                    "height": _unscale(node.height),
                     "level": node.level,
-                    "color": self._color_to_name(node.outline_color),
+                    "fill_color": self._color_to_name(node.fill_color),
+                    "outline_color": self._color_to_name(node.outline_color),
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -1318,8 +1377,8 @@ class DiagramApp:
                 {
                     "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
                     "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
-                    "manual_mid_x": connection.manual_mid_x,
-                    "manual_mid_y": connection.manual_mid_y,
+                    "manual_mid_x": _unscale(connection.manual_mid_x),
+                    "manual_mid_y": _unscale(connection.manual_mid_y),
                 }
             )
         payload = {"blocks": blocks, "connections": connections, "wires": wires}
@@ -1363,7 +1422,7 @@ class DiagramApp:
         kind = node.kind
         items: list[int] = []
         outline = node.outline_color
-        fill = "#e0e0e0"
+        fill = node.fill_color
         if kind.startswith("AND"):
             mid_x = (x1 + x2) / 2
             rect = self.canvas.create_rectangle(x1, y1, mid_x, y2, fill=fill, outline="", width=0)
@@ -1588,7 +1647,10 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
         width = int(block.get("width", 160))
         height = int(block.get("height", max(100, 40 + 20 * max(inputs_count, outputs_count, 1))))
         level = block.get("level")
-        color = DiagramApp._color_to_hex(str(block.get("color", "GRAY")))
+        fill_raw = block.get("fill_color", block.get("color", "#e0e0e0"))
+        outline_raw = block.get("outline_color", block.get("color", "GRAY"))
+        fill_color = DiagramApp._color_to_hex(str(fill_raw))
+        outline_color = DiagramApp._color_to_hex(str(outline_raw))
         node = Node(
             name=name,
             kind=kind,
@@ -1599,7 +1661,8 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
             width=width,
             height=height,
             base_height=height,
-            outline_color=color,
+            outline_color=outline_color,
+            fill_color=fill_color,
             level=int(level) if level is not None else 0,
         )
         nodes[name] = node
