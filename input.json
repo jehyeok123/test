@@ -1,0 +1,152 @@
+{
+  "blocks": [
+    {
+      "name": "BlockA",
+      "kind": "BLOCK",
+      "x": 80,
+      "y": 80,
+      "width": 160,
+      "height": 100,
+      "level": 0,
+      "fill_color": "WHITE",
+      "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
+      "ports": {
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
+      }
+    },
+    {
+      "name": "BlockB",
+      "kind": "BLOCK",
+      "x": 340,
+      "y": 80,
+      "width": 160,
+      "height": 100,
+      "level": 1,
+      "fill_color": "WHITE",
+      "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
+      "ports": {
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
+      }
+    },
+    {
+      "name": "BlockC",
+      "kind": "BLOCK",
+      "x": 600,
+      "y": 80,
+      "width": 160,
+      "height": 100,
+      "level": 2,
+      "fill_color": "WHITE",
+      "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
+      "ports": {
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
+      }
+    },
+    {
+      "name": "Gate1",
+      "kind": "AND2",
+      "x": 400,
+      "y": 200,
+      "width": 60,
+      "height": 40,
+      "level": 3,
+      "fill_color": "WHITE",
+      "outline_color": "GRAY",
+      "outline_enabled": true,
+      "outline_thickness": 1.0,
+      "outline_style": "solid",
+      "font_size": 12,
+      "ports": {
+        "in1": {
+          "side": "left",
+          "offset": 0.33
+        },
+        "in2": {
+          "side": "left",
+          "offset": 0.66
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
+      }
+    }
+  ],
+  "connections": [
+    {
+      "src": "BlockA.out1",
+      "dst": "BlockB.in1"
+    },
+    {
+      "src": "BlockA.out1",
+      "dst": "Gate1.in1"
+    },
+    {
+      "src": "BlockB.out1",
+      "dst": "Gate1.in2"
+    },
+    {
+      "src": "Gate1.out1",
+      "dst": "BlockC.in1"
+    }
+  ],
+  "wires": [
+    {
+      "src": "BlockA.out1",
+      "dst": "BlockB.in1",
+      "manual_mid_x": null,
+      "manual_mid_y": null
+    },
+    {
+      "src": "BlockA.out1",
+      "dst": "Gate1.in1",
+      "manual_mid_x": null,
+      "manual_mid_y": null
+    },
+    {
+      "src": "BlockB.out1",
+      "dst": "Gate1.in2",
+      "manual_mid_x": null,
+      "manual_mid_y": null
+    },
+    {
+      "src": "Gate1.out1",
+      "dst": "BlockC.in1",
+      "manual_mid_x": null,
+      "manual_mid_y": null
+    }
+  ]
+}
