@@ -161,8 +161,12 @@ class DiagramApp:
             base_width = 4 if node.resize_enabled else 2
             outline_width = max(1, base_width * node.outline_scale)
             dash = (4, 2) if node.outline_style == "dashed" else None
-            outline = node.outline_color if node.outline_enabled else ""
-            width = outline_width if node.outline_enabled else 0
+            if node.resize_enabled:
+                outline = "black"
+                width = outline_width
+            else:
+                outline = node.outline_color if node.outline_enabled else ""
+                width = outline_width if node.outline_enabled else 0
             rect = self.canvas.create_rectangle(
                 x1,
                 y1,
@@ -1046,7 +1050,7 @@ class DiagramApp:
         bold_check = tk.Checkbutton(block_frame, text="Bold", variable=bold_var)
         bold_check.grid(row=3, column=1, padx=6, pady=6, sticky="w")
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
-        fill_var = tk.StringVar(value="GRAY")
+        fill_var = tk.StringVar(value="WHITE")
         tk.Label(block_frame, text="Fill Color").grid(row=4, column=0, padx=6, pady=6, sticky="w")
         fill_menu = tk.OptionMenu(block_frame, fill_var, *color_options)
         fill_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
@@ -1056,7 +1060,7 @@ class DiagramApp:
         outline_check = tk.Checkbutton(block_frame, variable=outline_enabled_var)
         outline_check.grid(row=5, column=1, padx=6, pady=6, sticky="w")
         tk.Label(block_frame, text="Outline Color").grid(row=6, column=0, padx=6, pady=6, sticky="w")
-        outline_var = tk.StringVar(value="GRAY")
+        outline_var = tk.StringVar(value="BLACK")
         outline_menu = tk.OptionMenu(block_frame, outline_var, *color_options)
         outline_menu.grid(row=6, column=1, padx=6, pady=6, sticky="w")
         tk.Label(block_frame, text="Outline Thickness").grid(row=7, column=0, padx=6, pady=6, sticky="w")
@@ -1104,6 +1108,9 @@ class DiagramApp:
                 if candidate not in self.nodes:
                     return candidate
                 index += 1
+
+        def _align_gate_to_grid(target: Node):
+            self._align_gate_ports_to_grid(target)
 
         if node:
             name_entry.insert("1.0", node.name)
@@ -1162,6 +1169,7 @@ class DiagramApp:
                     label_font_weight="bold",
                     level=self._next_level(),
                 )
+                _align_gate_to_grid(new_node)
                 self.nodes[name] = new_node
                 self._draw_node(new_node)
                 self._apply_z_order(active_node_name=new_node.name)
@@ -1214,6 +1222,15 @@ class DiagramApp:
             if connection.dst and connection.dst[0] == old_name:
                 connection.dst = (new_name, connection.dst[1])
         self._redraw_node(node)
+
+    def _align_gate_ports_to_grid(self, node: Node):
+        node.x = self._snap_value(node.x)
+        node.y = self._snap_value(node.y)
+        for port in node.inputs + node.outputs:
+            if port.side != "right":
+                continue
+            y = node.y + port.offset * node.height
+            port.manual_y = self._snap_value(y)
 
     def _next_block_position(self) -> tuple[int, int]:
         if not self.nodes:
@@ -1464,6 +1481,12 @@ class DiagramApp:
                 return None
             return round(value / self._zoom_scale, 2)
 
+        existing = {}
+        if self.input_path.exists():
+            try:
+                existing = json.loads(self.input_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing = {}
         blocks = []
         for node in self.nodes.values():
             ports = {}
@@ -1489,10 +1512,10 @@ class DiagramApp:
                 "outline_thickness": node.outline_scale,
                 "outline_style": node.outline_style,
                 "font_size": node.label_font_size,
-                "font_family": node.label_font_family,
-                "font_weight": node.label_font_weight,
-            }
-        )
+                    "font_family": node.label_font_family,
+                    "font_weight": node.label_font_weight,
+                }
+            )
         blocks.sort(key=lambda block: block["level"])
         connections = []
         wires = []
@@ -1512,7 +1535,26 @@ class DiagramApp:
                     "manual_mid_y": _unscale(connection.manual_mid_y),
                 }
             )
-        payload = {"blocks": blocks, "connections": connections, "wires": wires}
+        existing_blocks = {item.get("name"): item for item in existing.get("blocks", []) if item.get("name")}
+        for block in blocks:
+            existing_blocks[block["name"]] = block
+        merged_blocks = list(existing_blocks.values())
+        merged_blocks.sort(key=lambda block: block.get("level", 0))
+
+        def _conn_key(item: dict) -> tuple[str | None, str | None]:
+            return (item.get("src"), item.get("dst"))
+
+        existing_connections = {_conn_key(item): item for item in existing.get("connections", [])}
+        for entry in connections:
+            existing_connections[_conn_key(entry)] = entry
+        merged_connections = list(existing_connections.values())
+
+        existing_wires = {_conn_key(item): item for item in existing.get("wires", [])}
+        for entry in wires:
+            existing_wires[_conn_key(entry)] = entry
+        merged_wires = list(existing_wires.values())
+
+        payload = {"blocks": merged_blocks, "connections": merged_connections, "wires": merged_wires}
         self.input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _gate_types(self) -> list[str]:
@@ -1808,6 +1850,15 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
             label_font_weight=font_weight,
             level=int(level) if level is not None else 0,
         )
+        if node.kind != "BLOCK":
+            snap = lambda value: int(round(value / DiagramApp.GRID_STEP) * DiagramApp.GRID_STEP)
+            node.x = snap(node.x)
+            node.y = snap(node.y)
+            for port in node.inputs + node.outputs:
+                if port.side != "right":
+                    continue
+                y = node.y + port.offset * node.height
+                port.manual_y = snap(y)
         nodes[name] = node
         order.append(name)
 
