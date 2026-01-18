@@ -217,6 +217,7 @@ class DiagramApp:
             )
             node.items.append(label)
 
+        self._clamp_ports_to_node(node)
         ports = node.inputs + node.outputs
         for port in ports:
             px, py = self._port_position(node, port)
@@ -492,6 +493,7 @@ class DiagramApp:
         else:
             node.x = orig_right - node.width
             node.y = orig_y
+        self._clamp_ports_to_node(node)
         self._redraw_node(node)
         self._update_connections()
 
@@ -515,6 +517,24 @@ class DiagramApp:
         if min_value is not None:
             return max(min_value, snapped)
         return snapped
+
+    def _clamp_ports_to_node(self, node: Node):
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        radius = self.PORT_RADIUS
+        for port in node.inputs + node.outputs:
+            if port.side in ("left", "right"):
+                if port.manual_y is None:
+                    port.manual_y = y1 + port.offset * (y2 - y1)
+                min_y = y1 + radius
+                max_y = y2 - radius
+                clamped = max(min_y, min(port.manual_y, max_y))
+                clamped = self._snap_value(clamped, int(min_y))
+                port.manual_y = clamped
+                port.offset = 0 if y2 == y1 else (clamped - y1) / (y2 - y1)
+            else:
+                port.manual_y = None
+                port.offset = max(0.0, min(1.0, port.offset))
 
     @staticmethod
     def _snap_to_step(value: float, step: int) -> float:
@@ -1570,9 +1590,15 @@ class DiagramApp:
                 node.base_height *= factor
             else:
                 node.image_subsample = max(1, int(round(node.image_subsample / factor)))
+                base_image = self._gate_base_image(node.kind)
+                if base_image:
+                    node.width = base_image.width() / node.image_subsample
+                    node.height = base_image.height() / node.image_subsample
+                    node.base_height = node.height
             for port in node.inputs + node.outputs:
                 if port.manual_y is not None:
                     port.manual_y *= factor
+            self._clamp_ports_to_node(node)
         for connection in self.connections:
             if connection.manual_mid_x is not None:
                 connection.manual_mid_x *= factor
@@ -1594,12 +1620,6 @@ class DiagramApp:
                 return None
             return round(value / self._zoom_scale, 2)
 
-        existing = {}
-        if self.input_path.exists():
-            try:
-                existing = json.loads(self.input_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                existing = {}
         blocks = []
         for node in self.nodes.values():
             ports = {}
@@ -1648,26 +1668,7 @@ class DiagramApp:
                     "manual_mid_y": _unscale(connection.manual_mid_y),
                 }
             )
-        existing_blocks = {item.get("name"): item for item in existing.get("blocks", []) if item.get("name")}
-        for block in blocks:
-            existing_blocks[block["name"]] = block
-        merged_blocks = list(existing_blocks.values())
-        merged_blocks.sort(key=lambda block: block.get("level", 0))
-
-        def _conn_key(item: dict) -> tuple[str | None, str | None]:
-            return (item.get("src"), item.get("dst"))
-
-        existing_connections = {_conn_key(item): item for item in existing.get("connections", [])}
-        for entry in connections:
-            existing_connections[_conn_key(entry)] = entry
-        merged_connections = list(existing_connections.values())
-
-        existing_wires = {_conn_key(item): item for item in existing.get("wires", [])}
-        for entry in wires:
-            existing_wires[_conn_key(entry)] = entry
-        merged_wires = list(existing_wires.values())
-
-        payload = {"blocks": merged_blocks, "connections": merged_connections, "wires": merged_wires}
+        payload = {"blocks": blocks, "connections": connections, "wires": wires}
         self.input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _gate_types(self) -> list[str]:
@@ -1700,18 +1701,18 @@ class DiagramApp:
     @staticmethod
     def _gate_definitions_static() -> dict[str, dict[str, int]]:
         return {
-            "AND2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
-            "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
-            "OR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
-            "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
-            "XOR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
-            "XOR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
-            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
-            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 40},
-            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 40},
-            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 40},
-            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 40},
-            "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 40},
+            "AND2": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "AND4": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
+            "OR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
+            "XOR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "XOR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
+            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
+            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 50},
+            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 50},
+            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 50},
         }
 
     def save_diagram(self, path: Path):
