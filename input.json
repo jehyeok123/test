@@ -3,98 +3,86 @@
     {
       "name": "BlockA",
       "kind": "BLOCK",
-      "inputs": 1,
-      "outputs": 1,
       "x": 80,
       "y": 80,
       "width": 160,
       "height": 100,
       "level": 0,
-      "color": "#666666",
+      "color": "GRAY",
       "ports": {
-        "inputs": [
-          {
-            "name": "in1",
-            "side": "left",
-            "offset": 0.5
-          }
-        ],
-        "outputs": [
-          {
-            "name": "out1",
-            "side": "right",
-            "offset": 0.5
-          }
-        ]
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
       }
     },
     {
       "name": "BlockB",
       "kind": "BLOCK",
-      "inputs": 1,
-      "outputs": 1,
       "x": 340,
       "y": 80,
       "width": 160,
       "height": 100,
       "level": 1,
-      "color": "#666666",
+      "color": "GRAY",
       "ports": {
-        "inputs": [
-          {
-            "name": "in1",
-            "side": "left",
-            "offset": 0.5
-          }
-        ],
-        "outputs": [
-          {
-            "name": "out1",
-            "side": "right",
-            "offset": 0.5
-          }
-        ]
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
       }
     },
     {
       "name": "BlockC",
       "kind": "BLOCK",
-      "inputs": 1,
-      "outputs": 1,
       "x": 600,
       "y": 80,
       "width": 160,
       "height": 100,
       "level": 2,
-      "color": "#666666",
+      "color": "GRAY",
       "ports": {
-        "inputs": [
-          {
-            "name": "in1",
-            "side": "left",
-            "offset": 0.5
-          }
-        ],
-        "outputs": [
-          {
-            "name": "out1",
-            "side": "right",
-            "offset": 0.5
-          }
-        ]
+        "in1": {
+          "side": "left",
+          "offset": 0.5
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
       }
     },
     {
       "name": "Gate1",
       "kind": "AND2",
-      "inputs": 2,
-      "outputs": 1,
       "x": 400,
       "y": 200,
       "width": 60,
       "height": 40,
       "level": 3,
-      "color": "#666666"
+      "color": "GRAY",
+      "ports": {
+        "in1": {
+          "side": "left",
+          "offset": 0.33
+        },
+        "in2": {
+          "side": "left",
+          "offset": 0.66
+        },
+        "out1": {
+          "side": "right",
+          "offset": 0.5
+        }
+      }
     }
   ],
   "connections": [

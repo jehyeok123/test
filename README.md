@@ -30,6 +30,7 @@ DISCONNECT 버튼은 연결선을 빨간색으로 표시하고, 선택한 연결
 SHOW/HIDE PORT 버튼으로 포트 점 표시를 켜거나 끌 수 있습니다.
 WIRE NAME 버튼은 연결선을 파란색으로 표시하고, 선택한 연결선에 이름을 입력합니다.
 BRING FRONT/SEND BACK 버튼으로 선택한 블록/게이트의 level을 이웃 level과 교환합니다.
+SAVE 버튼을 누르면 현재 블록/배선 정보가 `input.json`에 저장됩니다.
 CONNECT/DISCONNECT 모드에서는 블록 이동, 크기 조절, 포트 이동이 비활성화됩니다.
 
 ## 사용 방법
@@ -53,29 +54,21 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
     {
       "name": "BlockA",
       "kind": "BLOCK",
-      "inputs": 2,
-      "outputs": 1,
       "x": 80,
       "y": 80,
       "width": 160,
       "height": 100,
       "level": 0,
-      "color": "#666666",
+      "color": "GRAY",
       "ports": {
-        "inputs": [
-          {
-            "name": "in1",
-            "side": "left",
-            "offset": 0.33
-          }
-        ],
-        "outputs": [
-          {
-            "name": "out1",
-            "side": "right",
-            "offset": 0.5
-          }
-        ]
+        "p1": {
+          "side": "left",
+          "offset": 0.33
+        },
+        "p2": {
+          "side": "right",
+          "offset": 0.5
+        }
       }
     }
   ],
@@ -99,6 +92,7 @@ Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
 
 블록/게이트는 `blocks`에 정의하며, `connections`는 논리 연결을 정의합니다.
 `wires`에는 연결선의 꺾임 지점(`manual_mid_x`, `manual_mid_y`)과 같은 시각적 정보를 저장합니다.
-포트 위치를 고정하려면 `ports.inputs`/`ports.outputs`에 `side`, `offset`, `manual_y`를 지정합니다.
+포트 위치를 고정하려면 `ports` 아래에 각 포트 이름을 키로 두고 `side`, `offset`, `manual_y`를 지정합니다.
+`color`는 `GRAY`, `BLUE`, `RED`처럼 이름 문자열을 넣으면 해당 색상이 적용됩니다.
 연결에 사용되지 않은 포트가 있으면 `error.log`에 기록됩니다.
 포트 이동은 10 단위로 스냅됩니다.

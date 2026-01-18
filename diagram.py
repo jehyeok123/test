@@ -52,15 +52,26 @@ class DiagramApp:
     GRID_STEP = 10
     MID_STEP = 5
     PORT_RADIUS = 5
+    COLOR_NAME_TO_HEX = {
+        "GRAY": "#666666",
+        "BLUE": "blue",
+        "RED": "red",
+        "GREEN": "green",
+        "BLACK": "black",
+        "YELLOW": "yellow",
+    }
+    COLOR_HEX_TO_NAME = {value.lower(): key for key, value in COLOR_NAME_TO_HEX.items()}
 
     def __init__(
         self,
         nodes: dict[str, Node],
         connections: list[Connection],
+        input_path: Path,
         output_path: Path,
     ):
         self.nodes = nodes
         self.connections = connections
+        self.input_path = input_path
         self.output_path = output_path
         self.root = tk.Tk()
         self.root.title("Block Diagram")
@@ -68,6 +79,8 @@ class DiagramApp:
         self.toolbar.pack(fill=tk.X)
         self.new_button = tk.Button(self.toolbar, text="NEW", command=self._open_new_block)
         self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.save_button = tk.Button(self.toolbar, text="SAVE", command=self._save_json)
+        self.save_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
         self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
         self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
@@ -407,6 +420,19 @@ class DiagramApp:
         if not self.nodes:
             return 0
         return max(node.level for node in self.nodes.values()) + 1
+
+    @classmethod
+    def _color_to_hex(cls, color: str) -> str:
+        if not color:
+            return "#666666"
+        lookup = cls.COLOR_NAME_TO_HEX.get(color.upper())
+        return lookup if lookup else color
+
+    @classmethod
+    def _color_to_name(cls, color: str) -> str:
+        if not color:
+            return "GRAY"
+        return cls.COLOR_HEX_TO_NAME.get(color.lower(), color)
 
     def _raise_connection(self, connection: Connection):
         if connection.line_id:
@@ -1254,6 +1280,51 @@ class DiagramApp:
         node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
 
+    def _save_json(self):
+        blocks = []
+        for node in self.nodes.values():
+            ports = {}
+            for port in node.inputs + node.outputs:
+                ports[port.name] = {
+                    "side": port.side,
+                    "offset": port.offset,
+                    "manual_y": port.manual_y,
+                }
+            blocks.append(
+                {
+                    "name": node.name,
+                    "kind": node.kind,
+                    "ports": ports,
+                    "x": node.x,
+                    "y": node.y,
+                    "width": node.width,
+                    "height": node.height,
+                    "level": node.level,
+                    "color": self._color_to_name(node.outline_color),
+                }
+            )
+        blocks.sort(key=lambda block: block["level"])
+        connections = []
+        wires = []
+        for connection in self.connections:
+            connections.append(
+                {
+                    "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
+                    "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
+                    "label": connection.label,
+                }
+            )
+            wires.append(
+                {
+                    "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
+                    "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
+                    "manual_mid_x": connection.manual_mid_x,
+                    "manual_mid_y": connection.manual_mid_y,
+                }
+            )
+        payload = {"blocks": blocks, "connections": connections, "wires": wires}
+        self.input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def _gate_types(self) -> list[str]:
         return list(self._gate_definitions().keys())
 
@@ -1438,15 +1509,14 @@ def _assign_port_offsets(ports: list[Port], side: str):
 
 
 def _parse_port_specs(
-    specs: list[dict[str, object]] | None,
+    specs: dict[str, dict[str, object]] | None,
     count: int,
     prefix: str,
     default_side: str,
 ) -> list[Port]:
     if specs:
         ports = []
-        for spec in specs:
-            name = str(spec.get("name") or f"{prefix}{len(ports) + 1}")
+        for name, spec in specs.items():
             side = str(spec.get("side") or default_side)
             offset = float(spec.get("offset", 0.5))
             manual_y = spec.get("manual_y")
@@ -1508,19 +1578,22 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
                 outputs_count = outputs_count or gate_def["outputs"]
         ports_info = block.get("ports")
         ports_info = ports_info if isinstance(ports_info, dict) else {}
-        input_ports = _parse_port_specs(ports_info.get("inputs"), inputs_count, "in", "left")
-        output_ports = _parse_port_specs(ports_info.get("outputs"), outputs_count, "out", "right")
+        if ports_info:
+            ports = _parse_port_specs(ports_info, 0, "io", "left")
+        else:
+            ports = _parse_port_specs(None, inputs_count, "in", "left")
+            ports.extend(_parse_port_specs(None, outputs_count, "out", "right"))
         x = int(block.get("x", 80))
         y = int(block.get("y", 80))
         width = int(block.get("width", 160))
         height = int(block.get("height", max(100, 40 + 20 * max(inputs_count, outputs_count, 1))))
         level = block.get("level")
-        color = str(block.get("color", "#666666"))
+        color = DiagramApp._color_to_hex(str(block.get("color", "GRAY")))
         node = Node(
             name=name,
             kind=kind,
-            inputs=input_ports,
-            outputs=output_ports,
+            inputs=ports,
+            outputs=[],
             x=x,
             y=y,
             width=width,
@@ -1566,25 +1639,18 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
 
 
 def validate_connections(nodes: dict[str, Node], connections: list[Connection], log_path: Path) -> bool:
-    used_inputs: set[tuple[str, str]] = set()
-    used_outputs: set[tuple[str, str]] = set()
+    used_ports: set[tuple[str, str]] = set()
     for connection in connections:
         if connection.src:
-            used_outputs.add(connection.src)
+            used_ports.add(connection.src)
         if connection.dst:
-            used_inputs.add(connection.dst)
+            used_ports.add(connection.dst)
 
     errors: list[str] = []
     for node in nodes.values():
-        if node.kind != "BLOCK":
-            continue
-        for port in node.inputs:
-            if (node.name, port.name) not in used_inputs:
-                errors.append(f"[WARN] 입력 포트 미연결: {node.name}.{port.name}")
-                port.connected = False
-        for port in node.outputs:
-            if (node.name, port.name) not in used_outputs:
-                errors.append(f"[WARN] 출력 포트 미연결: {node.name}.{port.name}")
+        for port in node.inputs + node.outputs:
+            if (node.name, port.name) not in used_ports:
+                errors.append(f"[WARN] 포트 미연결: {node.name}.{port.name}")
                 port.connected = False
 
     if errors:
@@ -1604,7 +1670,7 @@ def main():
         sys.exit(1)
     nodes, connections = parse_json(input_path)
     validate_connections(nodes, connections, Path("error.log"))
-    app = DiagramApp(nodes, connections, output_path)
+    app = DiagramApp(nodes, connections, input_path, output_path)
     app.run()
 
 
