@@ -1,0 +1,11 @@
+[BlockA]
+in = 1
+out = 1
+
+[BlockB]
+in = 1
+out = 1
+
+[BlockC]
+in = 1
+out = 1
