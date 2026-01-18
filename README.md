@@ -1,6 +1,6 @@
 # Block Diagram Generator
 
-`diagram.py`는 `input.txt`와 `connections.txt`를 읽어 디지털 회로 블록 다이어그램을 생성합니다.
+`diagram.py`는 `input.json`을 읽어 디지털 회로 블록 다이어그램을 생성합니다.
 Tkinter 창에서 블록을 드래그하면 연결선도 함께 이동합니다.
 연결선은 직선이며 수평/수직이 아니면 가운데를 기준으로 90도 꺾임이 자동 생성됩니다.
 중앙에 생기는 세로선을 클릭 후 좌우로 드래그하면 꺾임 위치를 이동할 수 있습니다.
@@ -20,7 +20,7 @@ AND 게이트의 in/out 포트는 도형 중심선을 기준으로 배치됩니�
 포트는 반지름 5의 검정색 점으로 표시됩니다.
 높이를 변경해도 포트/배선의 기본 위치는 유지됩니다.
 포트는 블록의 상/하/좌/우 어느 테두리에도 생성할 수 있습니다.
-블록을 선택/수정하면 해당 블록과 연결된 선이 위로 올라옵니다.
+블록의 겹침 순서는 level 값에 따라 결정되며, level이 같을 때만 선택한 블록이 위로 올라옵니다.
 세로선을 드래그해 꺾임 위치를 옮길 때는 5 단위로 스냅됩니다.
 NEW 버튼에서 블록/게이트를 선택해 새 항목을 추가할 수 있으며, 블록은 이름만 입력하면 됩니다.
 CREATE PORT 버튼은 선택한 블록의 테두리를 초록색으로 표시한 뒤, 테두리를 클릭하면 해당 위치에 포트를 추가합니다.
@@ -29,44 +29,76 @@ CONNECT 버튼은 포트를 노란색으로 표시한 뒤 서로 다른 블록�
 DISCONNECT 버튼은 연결선을 빨간색으로 표시하고, 선택한 연결선을 삭제합니다.
 SHOW/HIDE PORT 버튼으로 포트 점 표시를 켜거나 끌 수 있습니다.
 WIRE NAME 버튼은 연결선을 파란색으로 표시하고, 선택한 연결선에 이름을 입력합니다.
-BRING FRONT/SEND BACK 버튼으로 선택한 블록/게이트를 맨 위 또는 아래로 이동할 수 있습니다.
+BRING FRONT/SEND BACK 버튼으로 선택한 블록/게이트의 level을 이웃 level과 교환합니다.
 CONNECT/DISCONNECT 모드에서는 블록 이동, 크기 조절, 포트 이동이 비활성화됩니다.
 
 ## 사용 방법
 
 ```bash
-python diagram.py input.txt connections.txt diagram.png
+python diagram.py input.json diagram.png
 ```
 
 기본값:
-- 블록 정의: `input.txt`
-- 연결 정의: `connections.txt`
+- 입력 정의: `input.json`
 - 출력 이미지: `diagram.png`
 
 PNG 저장을 위해서는 Pillow가 필요합니다.
 Pillow가 없으면 PostScript(`diagram.ps`)만 생성됩니다.
 
-## 블록 정의 (input.txt)
+## 입력 정의 (input.json)
 
-```ini
-[BlockA]
-in = 2
-out = 1
+```json
+{
+  "blocks": [
+    {
+      "name": "BlockA",
+      "kind": "BLOCK",
+      "inputs": 2,
+      "outputs": 1,
+      "x": 80,
+      "y": 80,
+      "width": 160,
+      "height": 100,
+      "level": 0,
+      "color": "#666666",
+      "ports": {
+        "inputs": [
+          {
+            "name": "in1",
+            "side": "left",
+            "offset": 0.33
+          }
+        ],
+        "outputs": [
+          {
+            "name": "out1",
+            "side": "right",
+            "offset": 0.5
+          }
+        ]
+      }
+    }
+  ],
+  "connections": [
+    {
+      "src": "BlockA.out1",
+      "dst": "BlockB.in1",
+      "label": "net1"
+    }
+  ],
+  "wires": [
+    {
+      "src": "BlockA.out1",
+      "dst": "BlockB.in1",
+      "manual_mid_x": 200,
+      "manual_mid_y": null
+    }
+  ]
+}
 ```
 
-`in`, `out`에는 포트 개수를 숫자로 입력합니다. 포트 이름은 `in1`, `in2`, `out1`처럼 자동 생성됩니다.
-
-## 연결 정의 (connections.txt)
-
-```text
-BlockA.out1 -> BlockB.in1 | cnt1[10:0]\ncnt2[10:0]
-AND2 Gate1: BlockA.out1, BlockB.out1 -> BlockC.in1 | and_net
-OR2 Gate2: BlockA.a_out, BlockB.b_out -> BlockC.c_in
-MUX_2x1 Gate3: BlockA.a_out, BlockB.b_out -> BlockC.c_in
--> BlockA.in1 | cnt1\ncnt2
-BlockA.out1 ->
-```
-
+블록/게이트는 `blocks`에 정의하며, `connections`는 논리 연결을 정의합니다.
+`wires`에는 연결선의 꺾임 지점(`manual_mid_x`, `manual_mid_y`)과 같은 시각적 정보를 저장합니다.
+포트 위치를 고정하려면 `ports.inputs`/`ports.outputs`에 `side`, `offset`, `manual_y`를 지정합니다.
 연결에 사용되지 않은 포트가 있으면 `error.log`에 기록됩니다.
-단일 포트 연결(`-> BlockA.in1` 또는 `BlockA.out1 ->`)은 길이 50의 가로선만 그려집니다.
 포트 이동은 10 단위로 스냅됩니다.

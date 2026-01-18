@@ -1,5 +1,4 @@
-import configparser
-import re
+import json
 import sys
 import tkinter as tk
 from tkinter import simpledialog
@@ -403,6 +402,11 @@ class DiagramApp:
             self.canvas.tag_raise(f"node:{node.name}")
         for connection in self.connections:
             self._raise_connection(connection)
+
+    def _next_level(self) -> int:
+        if not self.nodes:
+            return 0
+        return max(node.level for node in self.nodes.values()) + 1
 
     def _raise_connection(self, connection: Connection):
         if connection.line_id:
@@ -1009,6 +1013,7 @@ class DiagramApp:
                     width=width,
                     height=height,
                     base_height=height,
+                    level=self._next_level(),
                 )
             else:
                 name = name_entry.get().strip()
@@ -1028,6 +1033,7 @@ class DiagramApp:
                     width=160,
                     height=base_height,
                     base_height=base_height,
+                    level=self._next_level(),
                 )
             self.nodes[name] = node
             self._draw_node(node)
@@ -1230,7 +1236,10 @@ class DiagramApp:
         node = self.nodes.get(self._active_node_name)
         if not node:
             return
-        node.level += 1
+        neighbor = next((other for other in self.nodes.values() if other.level == node.level + 1), None)
+        if not neighbor:
+            return
+        node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
 
     def _send_active_back(self):
@@ -1239,7 +1248,10 @@ class DiagramApp:
         node = self.nodes.get(self._active_node_name)
         if not node:
             return
-        node.level -= 1
+        neighbor = next((other for other in self.nodes.values() if other.level == node.level - 1), None)
+        if not neighbor:
+            return
+        node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
 
     def _gate_types(self) -> list[str]:
@@ -1416,19 +1428,6 @@ class DiagramApp:
         self.root.mainloop()
 
 
-def _build_ports(value: str, prefix: str) -> list[str]:
-    text = value.strip()
-    if not text:
-        return []
-    try:
-        count = int(text)
-    except ValueError:
-        raise ValueError(f"포트 개수는 숫자로 입력해야 합니다: {value}")
-    if count < 0:
-        raise ValueError(f"포트 개수는 0 이상이어야 합니다: {value}")
-    return [f"{prefix}{idx}" for idx in range(1, count + 1)]
-
-
 def _assign_port_offsets(ports: list[Port], side: str):
     total = len(ports)
     if total == 0:
@@ -1438,118 +1437,132 @@ def _assign_port_offsets(ports: list[Port], side: str):
         port.offset = idx / (total + 1)
 
 
-def parse_blocks(path: Path) -> dict[str, Node]:
-    config = configparser.ConfigParser()
-    config.read(path)
+def _parse_port_specs(
+    specs: list[dict[str, object]] | None,
+    count: int,
+    prefix: str,
+    default_side: str,
+) -> list[Port]:
+    if specs:
+        ports = []
+        for spec in specs:
+            name = str(spec.get("name") or f"{prefix}{len(ports) + 1}")
+            side = str(spec.get("side") or default_side)
+            offset = float(spec.get("offset", 0.5))
+            manual_y = spec.get("manual_y")
+            port = Port(name=name, kind=prefix, side=side, offset=offset)
+            if manual_y is not None:
+                port.manual_y = float(manual_y)
+            ports.append(port)
+        return ports
+    ports = [Port(name=f"{prefix}{idx}", kind=prefix) for idx in range(1, count + 1)]
+    _assign_port_offsets(ports, default_side)
+    return ports
+
+
+def _parse_endpoint(value: object | None) -> tuple[str, str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        node_name, port_name = value.split(".", 1)
+        return (node_name, port_name)
+    if isinstance(value, dict):
+        node_name = value.get("node")
+        port_name = value.get("port")
+        if node_name and port_name:
+            return (str(node_name), str(port_name))
+    raise ValueError(f"연결 포트를 파싱할 수 없습니다: {value}")
+
+
+def _normalize_levels(nodes: dict[str, Node], order: list[str]):
+    levels = [nodes[name].level for name in order if name in nodes]
+    if len(set(levels)) != len(levels) or any(level is None for level in levels):
+        for idx, name in enumerate(order):
+            nodes[name].level = idx
+        return
+    ranked = sorted(order, key=lambda name: nodes[name].level)
+    for idx, name in enumerate(ranked):
+        nodes[name].level = idx
+
+
+def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    blocks = data.get("blocks", [])
+    connections_data = data.get("connections", [])
+    wires_data = data.get("wires", [])
     nodes: dict[str, Node] = {}
-    x, y = 80, 80
-    for section in config.sections():
-        inputs = _build_ports(config.get(section, "in", fallback=""), "in")
-        outputs = _build_ports(config.get(section, "out", fallback=""), "out")
-        base_height = max(100, 40 + 20 * max(len(inputs), len(outputs), 1))
-        input_ports = [Port(name=p, kind="in") for p in inputs]
-        output_ports = [Port(name=p, kind="out") for p in outputs]
-        _assign_port_offsets(input_ports, "left")
-        _assign_port_offsets(output_ports, "right")
+    order: list[str] = []
+
+    for block in blocks:
+        name = block.get("name")
+        if not name:
+            raise ValueError("블록 name이 필요합니다.")
+        name = str(name)
+        kind = str(block.get("kind", "BLOCK"))
+        inputs_count = int(block.get("inputs", 0))
+        outputs_count = int(block.get("outputs", 0))
+        if kind != "BLOCK":
+            gate_def = DiagramApp._gate_definitions_static().get(kind)
+            if gate_def:
+                inputs_count = inputs_count or gate_def["inputs"]
+                outputs_count = outputs_count or gate_def["outputs"]
+        ports_info = block.get("ports")
+        ports_info = ports_info if isinstance(ports_info, dict) else {}
+        input_ports = _parse_port_specs(ports_info.get("inputs"), inputs_count, "in", "left")
+        output_ports = _parse_port_specs(ports_info.get("outputs"), outputs_count, "out", "right")
+        x = int(block.get("x", 80))
+        y = int(block.get("y", 80))
+        width = int(block.get("width", 160))
+        height = int(block.get("height", max(100, 40 + 20 * max(inputs_count, outputs_count, 1))))
+        level = block.get("level")
+        color = str(block.get("color", "#666666"))
         node = Node(
-            name=section,
-            kind="BLOCK",
+            name=name,
+            kind=kind,
             inputs=input_ports,
             outputs=output_ports,
             x=x,
             y=y,
-            width=160,
-            height=base_height,
-            base_height=base_height,
+            width=width,
+            height=height,
+            base_height=height,
+            outline_color=color,
+            level=int(level) if level is not None else 0,
         )
-        nodes[section] = node
-        y += 160
-        if y > 600:
-            y = 80
-            x += 260
-    return nodes
+        nodes[name] = node
+        order.append(name)
 
+    _normalize_levels(nodes, order)
 
-def parse_connections(
-    path: Path,
-    nodes: dict[str, Node],
-) -> list[Connection]:
     connections: list[Connection] = []
-    gate_index = 1
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        line, label = _split_label(line)
-        gate_match = re.match(
-            r"^(AND2|AND4|OR2|OR4|XOR2|XOR4|INV|MUX_2x1|MUX_4x1|DEMUX_1x2|DEMUX_1x4|DFF)\s+(\w+)\s*:\s*(.+?)\s*->\s*(\S+)$",
-            line,
+    for entry in connections_data:
+        src = _parse_endpoint(entry.get("src"))
+        dst = _parse_endpoint(entry.get("dst"))
+        label = entry.get("label")
+        connection = Connection(
+            src=src,
+            dst=dst,
+            label=str(label) if label is not None else None,
+            manual_mid_x=entry.get("manual_mid_x"),
+            manual_mid_y=entry.get("manual_mid_y"),
         )
-        if gate_match:
-            gate_type, gate_name, inputs_raw, output_raw = gate_match.groups()
-            inputs = [item.strip() for item in inputs_raw.split(",") if item.strip()]
-            output = output_raw.strip()
-            gate_def = DiagramApp._gate_definitions_static()
-            outputs_count = gate_def[gate_type]["outputs"]
-            input_ports = [Port(name=f"in{idx+1}", kind="in") for idx in range(len(inputs))]
-            output_ports = [Port(name=f"out{idx+1}", kind="out") for idx in range(outputs_count)]
-            _assign_port_offsets(input_ports, "left")
-            _assign_port_offsets(output_ports, "right")
-            gate_node = Node(
-                name=gate_name,
-                kind=gate_type,
-                inputs=input_ports,
-                outputs=output_ports,
-                x=400 + gate_index * 40,
-                y=120 + gate_index * 40,
-                width=60,
-                height=40,
-                base_height=40,
-            )
-            nodes[gate_name] = gate_node
-            gate_index += 1
-            for idx, source in enumerate(inputs):
-                src_node, src_port = source.split(".", 1)
-                connections.append(
-                    Connection(src=(src_node, src_port), dst=(gate_name, f"in{idx+1}"), label=label)
-                )
-            dst_node, dst_port = output.split(".", 1)
-            connections.append(Connection(src=(gate_name, "out"), dst=(dst_node, dst_port), label=label))
-            continue
+        connections.append(connection)
 
-        direct_match = re.match(r"^(\S+)\s*->\s*(\S+)$", line)
-        if direct_match:
-            src, dst = direct_match.groups()
-            src_node, src_port = src.split(".", 1)
-            dst_node, dst_port = dst.split(".", 1)
-            connections.append(Connection(src=(src_node, src_port), dst=(dst_node, dst_port), label=label))
-            continue
+    if wires_data:
+        for wire in wires_data:
+            src = _parse_endpoint(wire.get("src"))
+            dst = _parse_endpoint(wire.get("dst"))
+            for connection in connections:
+                if connection.src == src and connection.dst == dst:
+                    if "manual_mid_x" in wire:
+                        connection.manual_mid_x = wire.get("manual_mid_x")
+                    if "manual_mid_y" in wire:
+                        connection.manual_mid_y = wire.get("manual_mid_y")
+                    if "label" in wire and wire.get("label") is not None:
+                        connection.label = str(wire.get("label"))
+                    break
 
-        dst_only_match = re.match(r"^->\s*(\S+)$", line)
-        if dst_only_match:
-            dst = dst_only_match.group(1)
-            dst_node, dst_port = dst.split(".", 1)
-            connections.append(Connection(src=None, dst=(dst_node, dst_port), label=label))
-            continue
-
-        src_only_match = re.match(r"^(\S+)\s*->$", line)
-        if src_only_match:
-            src = src_only_match.group(1)
-            src_node, src_port = src.split(".", 1)
-            connections.append(Connection(src=(src_node, src_port), dst=None, label=label))
-            continue
-
-        raise ValueError(f"연결 형식을 파싱할 수 없습니다: {line}")
-    return connections
-
-
-def _split_label(line: str) -> tuple[str, str | None]:
-    if "|" not in line:
-        return line, None
-    base, raw_label = line.split("|", 1)
-    label = raw_label.strip()
-    label = label.replace("\\n", "\n")
-    return base.strip(), label if label else None
+    return nodes, connections
 
 
 def validate_connections(nodes: dict[str, Node], connections: list[Connection], log_path: Path) -> bool:
@@ -1584,14 +1597,12 @@ def validate_connections(nodes: dict[str, Node], connections: list[Connection], 
 
 
 def main():
-    blocks_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("input.txt")
-    connections_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("connections.txt")
-    output_path = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("diagram.png")
-    if not blocks_path.exists() or not connections_path.exists():
-        print("input.txt 또는 connections.txt 파일이 없습니다.")
+    input_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("input.json")
+    output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("diagram.png")
+    if not input_path.exists():
+        print("input.json 파일이 없습니다.")
         sys.exit(1)
-    nodes = parse_blocks(blocks_path)
-    connections = parse_connections(connections_path, nodes)
+    nodes, connections = parse_json(input_path)
     validate_connections(nodes, connections, Path("error.log"))
     app = DiagramApp(nodes, connections, output_path)
     app.run()
