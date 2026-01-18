@@ -33,6 +33,7 @@ class Node:
     items: list[int] = field(default_factory=list)
     resize_enabled: bool = False
     outline_color: str = "#666666"
+    level: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
 
@@ -215,7 +216,7 @@ class DiagramApp:
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
         self._active_node_name = node.name
-        self._raise_node_and_wires(node.name)
+        self._apply_z_order(active_node_name=node.name)
         if node.resize_enabled:
             resize_mode = self._hit_test_edge(node, event.x, event.y)
             if resize_mode:
@@ -378,7 +379,7 @@ class DiagramApp:
         node.items.clear()
         self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
         self._draw_node(node)
-        self._raise_node_and_wires(node.name)
+        self._apply_z_order(active_node_name=node.name)
 
     def _snap_value(self, value: float, min_value: int | None = None) -> int:
         snapped = int(round(value / self.GRID_STEP) * self.GRID_STEP)
@@ -390,13 +391,18 @@ class DiagramApp:
     def _snap_to_step(value: float, step: int) -> float:
         return round(value / step) * step
 
-    def _raise_node_and_wires(self, node_name: str):
-        self.canvas.tag_raise(f"node:{node_name}")
+    def _apply_z_order(self, active_node_name: str | None = None):
+        nodes = list(self.nodes.values())
+        nodes.sort(
+            key=lambda node: (
+                node.level,
+                1 if active_node_name and node.name == active_node_name else 0,
+            )
+        )
+        for node in nodes:
+            self.canvas.tag_raise(f"node:{node.name}")
         for connection in self.connections:
-            if connection.src and connection.src[0] == node_name:
-                self._raise_connection(connection)
-            if connection.dst and connection.dst[0] == node_name:
-                self._raise_connection(connection)
+            self._raise_connection(connection)
 
     def _raise_connection(self, connection: Connection):
         if connection.line_id:
@@ -676,6 +682,33 @@ class DiagramApp:
             return
         orientation = self._connection_orientation(connection)
         if orientation == "orthogonal":
+            if not connection.src or not connection.dst:
+                return
+            src_node, src_port = connection.src
+            dst_node, dst_port = connection.dst
+            src_side = self._port_side((src_node, src_port))
+            dst_side = self._port_side((dst_node, dst_port))
+            if not src_side or not dst_side:
+                return
+            if src_side in ("left", "right"):
+                lr_target = self._find_port(src_node, src_port)
+                tb_target = self._find_port(dst_node, dst_port)
+            else:
+                lr_target = self._find_port(dst_node, dst_port)
+                tb_target = self._find_port(src_node, src_port)
+            if not lr_target or not tb_target:
+                return
+            h_x1, h_x2, h_y, v_x, v_y1, v_y2 = self._orthogonal_segments(coords)
+            if self._near_horizontal_segment(event.x, event.y, h_x1, h_x2, h_y):
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "orth_move_lr"
+                self._drag_wire["node"], self._drag_wire["port"] = lr_target
+                return
+            if self._near_vertical_segment(event.x, event.y, v_x, v_y1, v_y2):
+                self._drag_wire["connection"] = connection
+                self._drag_wire["mode"] = "orth_move_tb"
+                self._drag_wire["node"], self._drag_wire["port"] = tb_target
+                return
             return
         if orientation == "vertical":
             mid_y = coords[3]
@@ -789,6 +822,15 @@ class DiagramApp:
             coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             self.canvas.coords(connection.line_id, *coords)
             return
+        if mode in ("orth_move_lr", "orth_move_tb"):
+            if self._mode != "normal":
+                return
+            node = self._drag_wire["node"]
+            port = self._drag_wire["port"]
+            if not node or not port:
+                return
+            self._move_port(node, port, event.x, event.y)
+            return
         if mode in ("src_port", "dst_port"):
             if self._mode != "normal":
                 return
@@ -830,6 +872,19 @@ class DiagramApp:
         if abs(py - y) > threshold:
             return False
         return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
+
+    @staticmethod
+    def _orthogonal_segments(
+        coords: list[float],
+    ) -> tuple[float, float, float, float, float, float]:
+        x1, y1, x2, y2, x3, y3 = coords
+        if y1 == y2:
+            h_x1, h_x2, h_y = x1, x2, y1
+            v_x, v_y1, v_y2 = x2, y2, y3
+        else:
+            h_x1, h_x2, h_y = x2, x3, y2
+            v_x, v_y1, v_y2 = x1, y1, y2
+        return h_x1, h_x2, h_y, v_x, v_y1, v_y2
 
     def _move_port(self, node: Node, port: Port, target_x: float, target_y: float):
         if port.canvas_id is None:
@@ -976,7 +1031,7 @@ class DiagramApp:
                 )
             self.nodes[name] = node
             self._draw_node(node)
-            self._raise_node_and_wires(node.name)
+            self._apply_z_order(active_node_name=node.name)
             window.destroy()
 
         tk.Button(window, text="Create", command=_create_block).grid(row=3, column=0, columnspan=3, pady=8)
@@ -1172,17 +1227,20 @@ class DiagramApp:
     def _bring_active_front(self):
         if not self._active_node_name:
             return
-        self._raise_node_and_wires(self._active_node_name)
+        node = self.nodes.get(self._active_node_name)
+        if not node:
+            return
+        node.level += 1
+        self._apply_z_order(active_node_name=node.name)
 
     def _send_active_back(self):
         if not self._active_node_name:
             return
-        self.canvas.tag_lower(f"node:{self._active_node_name}")
-        for connection in self.connections:
-            if connection.src and connection.src[0] == self._active_node_name:
-                self._lower_connection(connection)
-            if connection.dst and connection.dst[0] == self._active_node_name:
-                self._lower_connection(connection)
+        node = self.nodes.get(self._active_node_name)
+        if not node:
+            return
+        node.level -= 1
+        self._apply_z_order(active_node_name=node.name)
 
     def _gate_types(self) -> list[str]:
         return list(self._gate_definitions().keys())
