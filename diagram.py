@@ -127,7 +127,7 @@ class DiagramApp:
         self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (P)", command=self._toggle_create_port_mode, style="Tool.TButton")
         self.create_port_button.pack(side=tk.LEFT, padx=2)
         self.delete_port_button = ttk.Button(
-            self.toolbar_row2, text="DELETE PORT (CTRL+DEL)", command=self._toggle_delete_port_mode, style="Tool.TButton"
+            self.toolbar_row2, text="DELETE PORT (CTRL+P)", command=self._toggle_delete_port_mode, style="Tool.TButton"
         )
         self.delete_port_button.pack(side=tk.LEFT, padx=2)
         self.port_toggle_button = ttk.Button(
@@ -179,6 +179,7 @@ class DiagramApp:
         self._delete_overlays: dict[str, int] = {}
         self._wire_color_backup: dict[int, str] = {}
         self._node_color_backup: dict[str, tuple[str, str]] = {}
+        self._wire_preview_id: int | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -201,7 +202,7 @@ class DiagramApp:
         self.root.bind("i", lambda _event: self._open_new_block())
         self.root.bind("e", lambda _event: self._open_edit_block())
         self.root.bind("<Delete>", lambda _event: self._toggle_delete_mode())
-        self.root.bind("<Control-Delete>", lambda _event: self._toggle_delete_port_mode())
+        self.root.bind("<Control-p>", lambda _event: self._toggle_delete_port_mode())
         self.root.bind("`", lambda _event: self._toggle_ports())
         self.root.bind("<Control-s>", lambda _event: self._save_json())
         self.root.bind("<Control-z>", lambda _event: self._undo())
@@ -415,11 +416,14 @@ class DiagramApp:
         snapped_x = self._snap_value(event.x)
         snapped_y = self._snap_value(event.y)
         self._pending_midpoint = (snapped_x, snapped_y)
+        self._update_wire_preview(event.x, event.y)
 
     def _on_canvas_motion(self, event):
         if self._edge_resize["node"] is not None:
             self._resize_from_edge(event)
             return
+        if self._mode == "connect" and len(self._selected_ports) == 1:
+            self._update_wire_preview(event.x, event.y)
         if self._mode != "normal" or self._delete_mode:
             self._clear_edge_highlight()
             return
@@ -1358,6 +1362,7 @@ class DiagramApp:
             self._selected_ports.append((node_name, port_name))
             self._set_port_color(port, "blue")
             self._pending_midpoint = None
+            self._update_wire_preview(event.x, event.y)
             return
         if len(self._selected_ports) == 1:
             first_node, first_port = self._selected_ports[0]
@@ -1644,6 +1649,7 @@ class DiagramApp:
     def _reset_connect_mode(self):
         self._selected_ports = []
         self._pending_midpoint = None
+        self._clear_wire_preview()
         self._set_all_port_colors("black")
         self._mode = "normal"
 
@@ -1658,6 +1664,32 @@ class DiagramApp:
             self._reset_port_mode()
         self._mode = "disconnect"
         self._set_all_wire_colors("red")
+
+    def _update_wire_preview(self, x: float, y: float):
+        if len(self._selected_ports) != 1:
+            self._clear_wire_preview()
+            return
+        node_name, port_name = self._selected_ports[0]
+        port_id = self._get_port_canvas_id(node_name, port_name)
+        if not port_id:
+            self._clear_wire_preview()
+            return
+        x1, y1 = self._port_center(port_id)
+        x2, y2 = self._snap_value(x), self._snap_value(y)
+        if self._pending_midpoint:
+            mid_x, mid_y = self._pending_midpoint
+            coords = [x1, y1, mid_x, mid_y, x2, y2]
+        else:
+            coords = [x1, y1, x2, y2]
+        if self._wire_preview_id is None:
+            self._wire_preview_id = self.canvas.create_line(*coords, width=2, fill="#999999")
+        else:
+            self.canvas.coords(self._wire_preview_id, *coords)
+
+    def _clear_wire_preview(self):
+        if self._wire_preview_id is not None:
+            self.canvas.delete(self._wire_preview_id)
+        self._wire_preview_id = None
 
     def _toggle_delete_mode(self):
         if self._delete_mode:
@@ -1696,7 +1728,8 @@ class DiagramApp:
             for node in self.nodes.values():
                 if node.kind == "BLOCK":
                     if node.items:
-                        self.canvas.itemconfig(node.items[0], fill="red", outline="red")
+                        fill, _outline = self._node_color_backup.get(node.name, (node.fill_color, node.outline_color))
+                        self.canvas.itemconfig(node.items[0], fill=fill, outline="red")
                 else:
                     overlay_id = self._delete_overlays.get(node.name)
                     if not overlay_id:
@@ -1838,6 +1871,11 @@ class DiagramApp:
         self._mode = "create_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
+            for port in node.inputs + node.outputs:
+                if port.canvas_id:
+                    _, current_y = self._port_center(port.canvas_id)
+                    if port.side in ("left", "right"):
+                        port.manual_y = current_y
             self._outline_backup.setdefault(node.name, node.outline_color)
             node.outline_color = "green"
             node.resize_enabled = True
@@ -2103,6 +2141,7 @@ class DiagramApp:
         self._selected_ports = []
         self._active_node_name = None
         self._outline_backup.clear()
+        self._clear_wire_preview()
         self._mode = "normal"
         for node in self.nodes.values():
             self._draw_node(node)
@@ -2140,7 +2179,7 @@ class DiagramApp:
             "- DISCONNECT: click a wire to remove it.\n"
             "- WIRE NAME (L): click a wire to name it.\n"
             "- CREATE PORT (P): add a port on the selected block edge.\n"
-            "- DELETE PORT (Ctrl+Del): remove a port on the selected block.\n"
+            "- DELETE PORT (Ctrl+P): remove a port on the selected block.\n"
             "- SHOW/HIDE PORT (`): toggle port visibility.\n"
             "- BRING FRONT (F): move block forward.\n"
             "- SEND BACK (B): move block backward.\n"
