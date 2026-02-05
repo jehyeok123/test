@@ -1,6 +1,7 @@
 import json
 import sys
 import tkinter as tk
+from types import SimpleNamespace
 from tkinter import simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -487,6 +488,10 @@ class DiagramApp:
         self._edge_resize["node"] = node
         self._edge_resize["edge"] = edge
         self._edge_resize["orig"] = orig
+        pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
+        pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
+        event = SimpleNamespace(x=self.canvas.canvasx(pointer_x), y=self.canvas.canvasy(pointer_y))
+        self._resize_from_edge(event)
 
     def _resize_from_edge(self, event):
         node = self._edge_resize["node"]
@@ -580,7 +585,7 @@ class DiagramApp:
             return "right"
         return None
 
-    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
+    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 12.0) -> str | None:
         left = node.x
         right = node.x + node.width
         top = node.y
@@ -1672,7 +1677,7 @@ class DiagramApp:
         self._wire_color_backup = {}
         self._node_color_backup = {}
         for node in self.nodes.values():
-            if node.items:
+            if node.kind == "BLOCK" and node.items:
                 rect_id = node.items[0]
                 fill = self.canvas.itemcget(rect_id, "fill")
                 outline = self.canvas.itemcget(rect_id, "outline")
