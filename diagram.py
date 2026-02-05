@@ -1,7 +1,7 @@
 import json
 import sys
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,36 +84,59 @@ class DiagramApp:
         self.output_path = output_path
         self.root = tk.Tk()
         self.root.title("Block Diagram")
-        self.toolbar = tk.Frame(self.root)
-        self.toolbar.pack(fill=tk.X)
-        self.new_button = tk.Button(self.toolbar, text="NEW", command=self._open_new_block)
-        self.new_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.edit_button = tk.Button(self.toolbar, text="EDIT", command=self._open_edit_block)
-        self.edit_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.remove_button = tk.Button(self.toolbar, text="REMOVE", command=self._remove_active_node)
-        self.remove_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.save_button = tk.Button(self.toolbar, text="JSON SAVE", command=self._save_json)
-        self.save_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.connect_button = tk.Button(self.toolbar, text="CONNECT", command=self._toggle_connect_mode)
-        self.connect_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.disconnect_button = tk.Button(self.toolbar, text="DISCONNECT", command=self._toggle_disconnect_mode)
-        self.disconnect_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.create_port_button = tk.Button(self.toolbar, text="CREATE PORT", command=self._toggle_create_port_mode)
-        self.create_port_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.delete_port_button = tk.Button(self.toolbar, text="DELETE PORT", command=self._toggle_delete_port_mode)
-        self.delete_port_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.port_toggle_button = tk.Button(self.toolbar, text="SHOW/HIDE PORT", command=self._toggle_ports)
-        self.port_toggle_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.wire_name_button = tk.Button(self.toolbar, text="WIRE NAME", command=self._toggle_wire_name_mode)
-        self.wire_name_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.bring_front_button = tk.Button(self.toolbar, text="BRING FRONT", command=self._bring_active_front)
-        self.bring_front_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.send_back_button = tk.Button(self.toolbar, text="SEND BACK", command=self._send_active_back)
-        self.send_back_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.zoom_in_button = tk.Button(self.toolbar, text="ZOOM IN", command=self._zoom_in)
-        self.zoom_in_button.pack(side=tk.LEFT, padx=4, pady=4)
-        self.zoom_out_button = tk.Button(self.toolbar, text="ZOOM OUT", command=self._zoom_out)
-        self.zoom_out_button.pack(side=tk.LEFT, padx=4, pady=4)
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+        self.style.configure("Toolbar.TFrame", background="white")
+        self.style.configure(
+            "Tool.TButton",
+            font=("Arial", 9),
+            padding=(6, 3),
+            background="#f0f0f0",
+            foreground="#333333",
+        )
+        self.style.map(
+            "Tool.TButton",
+            background=[("active", "#e0e0e0"), ("pressed", "#d0d0d0")],
+        )
+        self.root.configure(bg="white")
+
+        self.toolbar = ttk.Frame(self.root, style="Toolbar.TFrame")
+        self.toolbar.pack(fill=tk.X, padx=4, pady=(4, 0))
+        self.toolbar_row1 = ttk.Frame(self.toolbar, style="Toolbar.TFrame")
+        self.toolbar_row1.pack(fill=tk.X, pady=(0, 2))
+        self.toolbar_row2 = ttk.Frame(self.toolbar, style="Toolbar.TFrame")
+        self.toolbar_row2.pack(fill=tk.X, pady=(0, 2))
+        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, pady=(2, 0))
+
+        self.new_button = ttk.Button(self.toolbar_row1, text="NEW (I)", command=self._open_new_block, style="Tool.TButton")
+        self.new_button.pack(side=tk.LEFT, padx=2)
+        self.edit_button = ttk.Button(self.toolbar_row1, text="EDIT (Q)", command=self._open_edit_block, style="Tool.TButton")
+        self.edit_button.pack(side=tk.LEFT, padx=2)
+        self.remove_button = ttk.Button(self.toolbar_row1, text="REMOVE (Del)", command=self._remove_active_node, style="Tool.TButton")
+        self.remove_button.pack(side=tk.LEFT, padx=2)
+        self.save_button = ttk.Button(self.toolbar_row1, text="SAVE (Ctrl+S)", command=self._save_json, style="Tool.TButton")
+        self.save_button.pack(side=tk.LEFT, padx=2)
+        self.connect_button = ttk.Button(self.toolbar_row1, text="CONNECT (W)", command=self._toggle_connect_mode, style="Tool.TButton")
+        self.connect_button.pack(side=tk.LEFT, padx=2)
+        self.disconnect_button = ttk.Button(self.toolbar_row1, text="DISCONNECT", command=self._toggle_disconnect_mode, style="Tool.TButton")
+        self.disconnect_button.pack(side=tk.LEFT, padx=2)
+        self.wire_name_button = ttk.Button(self.toolbar_row1, text="WIRE NAME (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
+        self.wire_name_button.pack(side=tk.LEFT, padx=2)
+
+        self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (P)", command=self._toggle_create_port_mode, style="Tool.TButton")
+        self.create_port_button.pack(side=tk.LEFT, padx=2)
+        self.delete_port_button = ttk.Button(self.toolbar_row2, text="DELETE PORT", command=self._toggle_delete_port_mode, style="Tool.TButton")
+        self.delete_port_button.pack(side=tk.LEFT, padx=2)
+        self.port_toggle_button = ttk.Button(self.toolbar_row2, text="SHOW/HIDE PORT", command=self._toggle_ports, style="Tool.TButton")
+        self.port_toggle_button.pack(side=tk.LEFT, padx=2)
+        self.bring_front_button = ttk.Button(self.toolbar_row2, text="BRING FRONT", command=self._bring_active_front, style="Tool.TButton")
+        self.bring_front_button.pack(side=tk.LEFT, padx=2)
+        self.send_back_button = ttk.Button(self.toolbar_row2, text="SEND BACK", command=self._send_active_back, style="Tool.TButton")
+        self.send_back_button.pack(side=tk.LEFT, padx=2)
+        self.zoom_in_button = ttk.Button(self.toolbar_row2, text="ZOOM IN", command=self._zoom_in, style="Tool.TButton")
+        self.zoom_in_button.pack(side=tk.LEFT, padx=2)
+        self.zoom_out_button = ttk.Button(self.toolbar_row2, text="ZOOM OUT", command=self._zoom_out, style="Tool.TButton")
+        self.zoom_out_button.pack(side=tk.LEFT, padx=2)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
