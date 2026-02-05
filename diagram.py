@@ -477,6 +477,7 @@ class DiagramApp:
         else:
             coords = (x2, y1, x2, y2)
         self._edge_highlight_id = self.canvas.create_line(*coords, width=4, fill=color)
+        self.canvas.itemconfigure(self._edge_highlight_id, state="disabled")
         self.canvas.tag_raise(self._edge_highlight_id)
 
     def _clear_edge_highlight(self):
