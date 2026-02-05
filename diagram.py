@@ -55,6 +55,7 @@ class Connection:
     manual_mid_y: float | None = None
     label: str | None = None
     label_id: int | None = None
+    waypoints: list[tuple[float, float]] = field(default_factory=list)
 
 
 class DiagramApp:
@@ -124,10 +125,10 @@ class DiagramApp:
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="WIRE NAME (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
         self.wire_name_button.pack(side=tk.LEFT, padx=2)
 
-        self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (P)", command=self._toggle_create_port_mode, style="Tool.TButton")
+        self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (A)", command=self._toggle_create_port_mode, style="Tool.TButton")
         self.create_port_button.pack(side=tk.LEFT, padx=2)
         self.delete_port_button = ttk.Button(
-            self.toolbar_row2, text="DELETE PORT (CTRL+P)", command=self._toggle_delete_port_mode, style="Tool.TButton"
+            self.toolbar_row2, text="DELETE PORT (CTRL+A)", command=self._toggle_delete_port_mode, style="Tool.TButton"
         )
         self.delete_port_button.pack(side=tk.LEFT, padx=2)
         self.port_toggle_button = ttk.Button(
@@ -168,7 +169,7 @@ class DiagramApp:
         self._outline_backup: dict[str, str] = {}
         self._history: list[dict[str, object]] = []
         self._redo_stack: list[dict[str, object]] = []
-        self._pending_midpoint: tuple[float, float] | None = None
+        self._pending_midpoints: list[tuple[float, float]] = []
         self._suspend_history = False
         self._hover_edge: tuple[Node, str] | None = None
         self._edge_highlight_id: int | None = None
@@ -180,6 +181,7 @@ class DiagramApp:
         self._wire_color_backup: dict[int, str] = {}
         self._node_color_backup: dict[str, tuple[str, str]] = {}
         self._wire_preview_id: int | None = None
+        self._pan_data: dict[str, object] = {"active": False, "x": 0, "y": 0}
         self._build_ui()
 
     def _build_ui(self):
@@ -202,14 +204,17 @@ class DiagramApp:
         self.root.bind("i", lambda _event: self._open_new_block())
         self.root.bind("e", lambda _event: self._open_edit_block())
         self.root.bind("<Delete>", lambda _event: self._toggle_delete_mode())
-        self.root.bind("<Control-p>", lambda _event: self._toggle_delete_port_mode())
+        self.root.bind("<Control-a>", lambda _event: self._toggle_delete_port_mode())
         self.root.bind("`", lambda _event: self._toggle_ports())
         self.root.bind("<Control-s>", lambda _event: self._save_json())
         self.root.bind("<Control-z>", lambda _event: self._undo())
         self.root.bind("<Control-y>", lambda _event: self._redo())
         self.root.bind("s", lambda _event: self._start_edge_resize())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
-        self.root.bind("p", lambda _event: self._toggle_create_port_mode())
+        self.root.bind("a", lambda _event: self._toggle_create_port_mode())
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_motion)
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_release)
         self.root.bind("l", lambda _event: self._toggle_wire_name_mode())
         self.root.bind("f", lambda _event: self._bring_active_front())
         self.root.bind("b", lambda _event: self._send_active_back())
@@ -339,6 +344,7 @@ class DiagramApp:
 
     def _on_press(self, event):
         if self._edge_resize["node"] is not None:
+            self._finish_edge_resize()
             return
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
@@ -415,7 +421,7 @@ class DiagramApp:
             return
         snapped_x = self._snap_value(event.x)
         snapped_y = self._snap_value(event.y)
-        self._pending_midpoint = (snapped_x, snapped_y)
+        self._pending_midpoints.append((snapped_x, snapped_y))
         self._update_wire_preview(event.x, event.y)
 
     def _on_canvas_motion(self, event):
@@ -458,7 +464,7 @@ class DiagramApp:
         self._resize_data["mode"] = None
         self._resize_data["orig"] = None
 
-    def _draw_edge_highlight(self, node: Node, edge: str):
+    def _draw_edge_highlight(self, node: Node, edge: str, color: str = "black"):
         self._clear_edge_highlight()
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
@@ -470,7 +476,7 @@ class DiagramApp:
             coords = (x1, y1, x1, y2)
         else:
             coords = (x2, y1, x2, y2)
-        self._edge_highlight_id = self.canvas.create_line(*coords, width=4, fill="black")
+        self._edge_highlight_id = self.canvas.create_line(*coords, width=4, fill=color)
         self.canvas.tag_raise(self._edge_highlight_id)
 
     def _clear_edge_highlight(self):
@@ -535,7 +541,7 @@ class DiagramApp:
                     port.manual_y = prev[1]
         self._redraw_node(node)
         self._update_connections()
-        self._draw_edge_highlight(node, edge)
+        self._draw_edge_highlight(node, edge, "yellow")
 
     def _finish_edge_resize(self):
         if self._edge_resize["node"] is None:
@@ -959,6 +965,21 @@ class DiagramApp:
                 return None
             x1, y1 = self._port_center(src_port_id)
             x2, y2 = self._port_center(dst_port_id)
+            if connection.waypoints:
+                points = [(x1, y1)]
+                for wx, wy in connection.waypoints:
+                    last_x, last_y = points[-1]
+                    if last_x != wx:
+                        points.append((wx, last_y))
+                    if last_y != wy:
+                        points.append((wx, wy))
+                last_x, last_y = points[-1]
+                if last_x != x2:
+                    points.append((x2, last_y))
+                if last_y != y2:
+                    points.append((x2, y2))
+                coords = [c for p in points for c in p]
+                return coords if len(coords) >= 4 else [x1, y1, x2, y2]
             if connection.manual_mid_x is not None:
                 return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
             if connection.manual_mid_y is not None:
@@ -1014,6 +1035,9 @@ class DiagramApp:
         return None
 
     def _on_wire_press(self, event):
+        if self._edge_resize["node"] is not None:
+            self._finish_edge_resize()
+            return
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -1106,6 +1130,8 @@ class DiagramApp:
                 self._drag_wire["node"] = node
                 self._drag_wire["port"] = port
                 return
+            return
+        if connection.waypoints:
             return
         orientation = self._connection_orientation(connection)
         if orientation == "orthogonal":
@@ -1342,6 +1368,9 @@ class DiagramApp:
         self._update_connections()
 
     def _on_port_press(self, event):
+        if self._edge_resize["node"] is not None:
+            self._finish_edge_resize()
+            return
         if self._mode == "delete_port":
             self._handle_delete_port_click(event)
             return
@@ -1361,7 +1390,7 @@ class DiagramApp:
         if not self._selected_ports:
             self._selected_ports.append((node_name, port_name))
             self._set_port_color(port, "blue")
-            self._pending_midpoint = None
+            self._pending_midpoints = []
             self._update_wire_preview(event.x, event.y)
             return
         if len(self._selected_ports) == 1:
@@ -1376,18 +1405,8 @@ class DiagramApp:
             src = (first_node, first_port)
             dst = (node_name, port_name)
             connection = Connection(src=src, dst=dst)
-            if self._pending_midpoint:
-                mid_x, mid_y = self._pending_midpoint
-                src_side = self._port_side(src)
-                dst_side = self._port_side(dst)
-                if src_side in ("left", "right") and dst_side in ("left", "right"):
-                    connection.manual_mid_x = mid_x
-                elif src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
-                    connection.manual_mid_y = mid_y
-                elif src_side in ("left", "right"):
-                    connection.manual_mid_x = mid_x
-                else:
-                    connection.manual_mid_y = mid_y
+            if self._pending_midpoints:
+                connection.waypoints = list(self._pending_midpoints)
             self.connections.append(connection)
             self._draw_connection(connection)
             self._record_history()
@@ -1643,12 +1662,12 @@ class DiagramApp:
             self._reset_port_mode()
         self._mode = "connect"
         self._selected_ports = []
-        self._pending_midpoint = None
+        self._pending_midpoints = []
         self._set_all_port_colors("yellow")
 
     def _reset_connect_mode(self):
         self._selected_ports = []
-        self._pending_midpoint = None
+        self._pending_midpoints = []
         self._clear_wire_preview()
         self._set_all_port_colors("black")
         self._mode = "normal"
@@ -1674,13 +1693,23 @@ class DiagramApp:
         if not port_id:
             self._clear_wire_preview()
             return
-        x1, y1 = self._port_center(port_id)
-        x2, y2 = self._snap_value(x), self._snap_value(y)
-        if self._pending_midpoint:
-            mid_x, mid_y = self._pending_midpoint
-            coords = [x1, y1, mid_x, mid_y, x2, y2]
-        else:
-            coords = [x1, y1, x2, y2]
+        start_x, start_y = self._port_center(port_id)
+        end_x, end_y = self._snap_value(x), self._snap_value(y)
+        points = [(start_x, start_y)]
+        for mx, my in self._pending_midpoints:
+            last_x, last_y = points[-1]
+            if last_x != mx:
+                points.append((mx, last_y))
+            if last_y != my:
+                points.append((mx, my))
+        last_x, last_y = points[-1]
+        if last_x != end_x:
+            points.append((end_x, last_y))
+        if last_y != end_y:
+            points.append((end_x, end_y))
+        coords = [c for p in points for c in p]
+        if len(coords) < 4:
+            coords = [start_x, start_y, end_x, end_y]
         if self._wire_preview_id is None:
             self._wire_preview_id = self.canvas.create_line(*coords, width=2, fill="#999999")
         else:
@@ -2027,6 +2056,8 @@ class DiagramApp:
                 connection.manual_mid_x *= factor
             if connection.manual_mid_y is not None:
                 connection.manual_mid_y *= factor
+            if connection.waypoints:
+                connection.waypoints = [(wx * factor, wy * factor) for wx, wy in connection.waypoints]
         for node in self.nodes.values():
             self._redraw_node(node)
         self._update_connections()
@@ -2047,6 +2078,38 @@ class DiagramApp:
         else:
             return
         self._record_history()
+
+    def _on_pan_start(self, event):
+        self._pan_data["active"] = True
+        self._pan_data["x"] = event.x
+        self._pan_data["y"] = event.y
+
+    def _on_pan_motion(self, event):
+        if not self._pan_data["active"]:
+            return
+        dx = event.x - self._pan_data["x"]
+        dy = event.y - self._pan_data["y"]
+        self._pan_data["x"] = event.x
+        self._pan_data["y"] = event.y
+        self.canvas.move("all", dx, dy)
+        for node in self.nodes.values():
+            node.x += dx
+            node.y += dy
+            for port in node.inputs + node.outputs:
+                if port.manual_y is not None:
+                    port.manual_y += dy
+        for conn in self.connections:
+            if conn.manual_mid_x is not None:
+                conn.manual_mid_x += dx
+            if conn.manual_mid_y is not None:
+                conn.manual_mid_y += dy
+            if conn.waypoints:
+                conn.waypoints = [(wx + dx, wy + dy) for wx, wy in conn.waypoints]
+
+    def _on_pan_release(self, _event):
+        if self._pan_data["active"]:
+            self._record_history()
+        self._pan_data["active"] = False
 
     def _build_payload(self, unscale: bool) -> dict[str, object]:
         def _unscale(value: float | None) -> float | None:
@@ -2096,14 +2159,15 @@ class DiagramApp:
                     "label": connection.label,
                 }
             )
-            wires.append(
-                {
-                    "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
-                    "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
-                    "manual_mid_x": _unscale(connection.manual_mid_x),
-                    "manual_mid_y": _unscale(connection.manual_mid_y),
-                }
-            )
+            wire_data = {
+                "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
+                "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
+                "manual_mid_x": _unscale(connection.manual_mid_x),
+                "manual_mid_y": _unscale(connection.manual_mid_y),
+            }
+            if connection.waypoints:
+                wire_data["waypoints"] = [(_unscale(wx), _unscale(wy)) for wx, wy in connection.waypoints]
+            wires.append(wire_data)
         return {"blocks": blocks, "connections": connections, "wires": wires}
 
     def _serialize_state(self) -> dict[str, object]:
@@ -2139,6 +2203,7 @@ class DiagramApp:
         self.canvas.delete("all")
         self._port_items.clear()
         self._selected_ports = []
+        self._pending_midpoints = []
         self._active_node_name = None
         self._outline_backup.clear()
         self._clear_wire_preview()
@@ -2178,16 +2243,18 @@ class DiagramApp:
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
             "- DISCONNECT: click a wire to remove it.\n"
             "- WIRE NAME (L): click a wire to name it.\n"
-            "- CREATE PORT (P): add a port on the selected block edge.\n"
-            "- DELETE PORT (Ctrl+P): remove a port on the selected block.\n"
+            "- CREATE PORT (A): add a port on the selected block edge.\n"
+            "- DELETE PORT (Ctrl+A): remove a port on the selected block.\n"
             "- SHOW/HIDE PORT (`): toggle port visibility.\n"
             "- BRING FRONT (F): move block forward.\n"
             "- SEND BACK (B): move block backward.\n"
             "- ZOOM IN/OUT (Ctrl+Wheel): zoom with the mouse wheel.\n"
             "- UNDO/REDO: Ctrl+Z / Ctrl+Y.\n"
+            "- PAN: hold middle mouse button (wheel) and drag to move the view.\n"
             "\n"
             "Tips\n"
-            "- Hover a block/gate edge to highlight it, press S to resize with the mouse, click to finish.\n"
+            "- Hover a block/gate edge to highlight it, press S to resize (border turns yellow), click to finish.\n"
+            "- In CONNECT mode, click empty space to add orthogonal bends. Multiple bends supported.\n"
         )
         label = tk.Label(window, text=text, justify="left", bg="white", font=("Arial", 10))
         label.pack(padx=12, pady=12)
@@ -2415,6 +2482,9 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.manual_mid_y = wire.get("manual_mid_y")
                     if "label" in wire and wire.get("label") is not None:
                         connection.label = str(wire.get("label"))
+                    waypoints = wire.get("waypoints")
+                    if waypoints:
+                        connection.waypoints = [(float(wp[0]), float(wp[1])) for wp in waypoints]
                     break
 
     return nodes, connections
