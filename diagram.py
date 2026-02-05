@@ -125,18 +125,32 @@ class DiagramApp:
 
         self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (P)", command=self._toggle_create_port_mode, style="Tool.TButton")
         self.create_port_button.pack(side=tk.LEFT, padx=2)
-        self.delete_port_button = ttk.Button(self.toolbar_row2, text="DELETE PORT", command=self._toggle_delete_port_mode, style="Tool.TButton")
+        self.delete_port_button = ttk.Button(
+            self.toolbar_row2, text="DELETE PORT (CTRL+DEL)", command=self._toggle_delete_port_mode, style="Tool.TButton"
+        )
         self.delete_port_button.pack(side=tk.LEFT, padx=2)
-        self.port_toggle_button = ttk.Button(self.toolbar_row2, text="SHOW/HIDE PORT", command=self._toggle_ports, style="Tool.TButton")
+        self.port_toggle_button = ttk.Button(
+            self.toolbar_row2, text="SHOW/HIDE PORT (`)", command=self._toggle_ports, style="Tool.TButton"
+        )
         self.port_toggle_button.pack(side=tk.LEFT, padx=2)
-        self.bring_front_button = ttk.Button(self.toolbar_row2, text="BRING FRONT", command=self._bring_active_front, style="Tool.TButton")
+        self.bring_front_button = ttk.Button(
+            self.toolbar_row2, text="BRING FRONT (F)", command=self._bring_active_front, style="Tool.TButton"
+        )
         self.bring_front_button.pack(side=tk.LEFT, padx=2)
-        self.send_back_button = ttk.Button(self.toolbar_row2, text="SEND BACK", command=self._send_active_back, style="Tool.TButton")
+        self.send_back_button = ttk.Button(
+            self.toolbar_row2, text="SEND BACK (B)", command=self._send_active_back, style="Tool.TButton"
+        )
         self.send_back_button.pack(side=tk.LEFT, padx=2)
-        self.zoom_in_button = ttk.Button(self.toolbar_row2, text="ZOOM IN", command=self._zoom_in, style="Tool.TButton")
+        self.zoom_in_button = ttk.Button(
+            self.toolbar_row2, text="ZOOM IN (CTRL+WHEEL)", command=self._zoom_in, style="Tool.TButton"
+        )
         self.zoom_in_button.pack(side=tk.LEFT, padx=2)
-        self.zoom_out_button = ttk.Button(self.toolbar_row2, text="ZOOM OUT", command=self._zoom_out, style="Tool.TButton")
+        self.zoom_out_button = ttk.Button(
+            self.toolbar_row2, text="ZOOM OUT (CTRL+WHEEL)", command=self._zoom_out, style="Tool.TButton"
+        )
         self.zoom_out_button.pack(side=tk.LEFT, padx=2)
+        self.guide_button = ttk.Button(self.toolbar_row2, text="GUIDE", command=self._open_guide, style="Tool.TButton")
+        self.guide_button.pack(side=tk.LEFT, padx=2)
         self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self._drag_data = {"node": None, "x": 0, "y": 0}
@@ -151,6 +165,10 @@ class DiagramApp:
         self._gate_source_images: dict[str, tk.PhotoImage] = {}
         self._zoom_scale = 1.0
         self._outline_backup: dict[str, str] = {}
+        self._history: list[dict[str, object]] = []
+        self._redo_stack: list[dict[str, object]] = []
+        self._pending_midpoint: tuple[float, float] | None = None
+        self._suspend_history = False
         self._build_ui()
 
     def _build_ui(self):
@@ -166,15 +184,26 @@ class DiagramApp:
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<Control-MouseWheel>", self._on_zoom_wheel)
+        self.canvas.bind("<Control-Button-4>", self._on_zoom_wheel)
+        self.canvas.bind("<Control-Button-5>", self._on_zoom_wheel)
         self.root.bind("s", lambda _event: self.save_diagram(self.output_path))
         self.root.bind("i", lambda _event: self._open_new_block())
         self.root.bind("q", lambda _event: self._open_edit_block())
         self.root.bind("<Delete>", lambda _event: self._remove_active_node())
+        self.root.bind("<Control-Delete>", lambda _event: self._toggle_delete_port_mode())
+        self.root.bind("`", lambda _event: self._toggle_ports())
         self.root.bind("<Control-s>", lambda _event: self._save_json())
+        self.root.bind("<Control-z>", lambda _event: self._undo())
+        self.root.bind("<Control-y>", lambda _event: self._redo())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("p", lambda _event: self._toggle_create_port_mode())
         self.root.bind("l", lambda _event: self._toggle_wire_name_mode())
+        self.root.bind("f", lambda _event: self._bring_active_front())
+        self.root.bind("b", lambda _event: self._send_active_back())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
+        self._record_history(initial=True)
 
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
@@ -346,7 +375,21 @@ class DiagramApp:
         self._drag_data["x"] = event.x
         self._drag_data["y"] = event.y
 
+    def _on_canvas_press(self, event):
+        if self._mode != "connect":
+            return
+        if len(self._selected_ports) != 1:
+            return
+        item = self.canvas.find_withtag("current")
+        if item:
+            return
+        snapped_x = self._snap_value(event.x)
+        snapped_y = self._snap_value(event.y)
+        self._pending_midpoint = (snapped_x, snapped_y)
+
     def _on_release(self, _event):
+        if self._drag_data["node"] and not self._resize_data["node"]:
+            self._record_history()
         self._drag_data["node"] = None
         self._resize_data["node"] = None
         self._resize_data["mode"] = None
@@ -467,9 +510,13 @@ class DiagramApp:
             node.y = orig_y + (orig_height - new_height)
             node.height = new_height
             for port, prev in old_port_positions:
-                port.manual_y = prev[1]
+                if port.side in ("left", "right"):
+                    port.manual_y = prev[1]
         elif mode == "bottom":
             node.height = self._snap_value(max(min_height, orig_height + dy), min_height)
+            for port, prev in old_port_positions:
+                if port.side in ("left", "right"):
+                    port.manual_y = prev[1]
         self._redraw_node(node)
         self._update_connections()
 
@@ -477,6 +524,10 @@ class DiagramApp:
         base_image = self._gate_base_image(node.kind)
         if not base_image:
             return
+        old_port_positions = []
+        for port in node.inputs + node.outputs:
+            if port.canvas_id:
+                old_port_positions.append((port, self._port_center(port.canvas_id)))
         orig_x, orig_y, orig_width, orig_height, _orig_subsample = orig
         orig_right = orig_x + orig_width
         orig_bottom = orig_y + orig_height
@@ -523,11 +574,17 @@ class DiagramApp:
         else:
             node.x = orig_right - node.width
             node.y = orig_y
+        if mode in ("top", "bottom"):
+            for port, prev in old_port_positions:
+                if port.side in ("left", "right"):
+                    port.manual_y = prev[1]
         self._clamp_ports_to_node(node)
         self._redraw_node(node)
         self._update_connections()
 
     def _on_resize_release(self, _event):
+        if self._resize_data["node"]:
+            self._record_history()
         self._resize_data["node"] = None
         self._resize_data["mode"] = None
         self._resize_data["orig"] = None
@@ -718,6 +775,10 @@ class DiagramApp:
         return [x1, y1, x1, y2, x2, y2]
 
     def _connection_orientation(self, connection: Connection) -> str | None:
+        if connection.manual_mid_x is not None:
+            return "horizontal"
+        if connection.manual_mid_y is not None:
+            return "vertical"
         if not connection.src or not connection.dst:
             return None
         src_node, src_port = connection.src
@@ -733,6 +794,8 @@ class DiagramApp:
         return "orthogonal"
 
     def _connection_manual_locked(self, connection: Connection) -> bool:
+        if connection.manual_mid_x is not None or connection.manual_mid_y is not None:
+            return False
         return self._connection_orientation(connection) == "orthogonal"
 
     def _connection_line_coords(self, connection: Connection) -> list[float] | None:
@@ -745,6 +808,10 @@ class DiagramApp:
                 return None
             x1, y1 = self._port_center(src_port_id)
             x2, y2 = self._port_center(dst_port_id)
+            if connection.manual_mid_x is not None:
+                return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
+            if connection.manual_mid_y is not None:
+                return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             orientation = self._connection_orientation(connection)
             if orientation == "horizontal":
                 return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
@@ -824,6 +891,7 @@ class DiagramApp:
                     coords = self._connection_line_coords(connection)
                     if coords:
                         self._update_label(connection, coords)
+                self._record_history()
             self._toggle_wire_name_mode()
             return
         if self._mode == "disconnect":
@@ -835,6 +903,7 @@ class DiagramApp:
             if not connection:
                 return
             self._remove_connection(connection)
+            self._record_history()
             self._toggle_disconnect_mode()
             return
         if self._mode != "normal":
@@ -1039,6 +1108,8 @@ class DiagramApp:
             return
 
     def _on_wire_release(self, _event):
+        if self._drag_wire["connection"]:
+            self._record_history()
         self._drag_wire["connection"] = None
         self._drag_wire["mode"] = None
         self._drag_wire["port"] = None
@@ -1129,6 +1200,7 @@ class DiagramApp:
         if not self._selected_ports:
             self._selected_ports.append((node_name, port_name))
             self._set_port_color(port, "blue")
+            self._pending_midpoint = None
             return
         if len(self._selected_ports) == 1:
             first_node, first_port = self._selected_ports[0]
@@ -1142,8 +1214,21 @@ class DiagramApp:
             src = (first_node, first_port)
             dst = (node_name, port_name)
             connection = Connection(src=src, dst=dst)
+            if self._pending_midpoint:
+                mid_x, mid_y = self._pending_midpoint
+                src_side = self._port_side(src)
+                dst_side = self._port_side(dst)
+                if src_side in ("left", "right") and dst_side in ("left", "right"):
+                    connection.manual_mid_x = mid_x
+                elif src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
+                    connection.manual_mid_y = mid_y
+                elif src_side in ("left", "right"):
+                    connection.manual_mid_x = mid_x
+                else:
+                    connection.manual_mid_y = mid_y
             self.connections.append(connection)
             self._draw_connection(connection)
+            self._record_history()
             self._reset_connect_mode()
             return
 
@@ -1313,6 +1398,7 @@ class DiagramApp:
                 self.nodes[name] = new_node
                 self._draw_node(new_node)
                 self._apply_z_order(active_node_name=new_node.name)
+                self._record_history()
                 window.destroy()
                 return
 
@@ -1338,6 +1424,7 @@ class DiagramApp:
                 self.nodes[new_name] = new_node
                 _apply_block_changes(new_node, new_name)
                 self._apply_z_order(active_node_name=new_node.name)
+                self._record_history()
                 window.destroy()
                 return
             if node and new_name != node.name and new_name in self.nodes:
@@ -1348,6 +1435,7 @@ class DiagramApp:
                 if new_name != old_name:
                     self._rename_node(old_name, new_name)
                 self._apply_z_order(active_node_name=node.name)
+                self._record_history()
                 window.destroy()
 
         tk.Button(window, text="Create", command=_create_or_edit).grid(row=2, column=0, columnspan=3, pady=8)
@@ -1393,10 +1481,12 @@ class DiagramApp:
             self._reset_port_mode()
         self._mode = "connect"
         self._selected_ports = []
+        self._pending_midpoint = None
         self._set_all_port_colors("yellow")
 
     def _reset_connect_mode(self):
         self._selected_ports = []
+        self._pending_midpoint = None
         self._set_all_port_colors("black")
         self._mode = "normal"
 
@@ -1443,20 +1533,23 @@ class DiagramApp:
             if (conn.src and conn.src[0] == node.name) or (conn.dst and conn.dst[0] == node.name)
         ]
         for conn in to_remove:
-            self._remove_connection(conn)
+            self._remove_connection(conn, record=False)
         for item in node.items:
             self.canvas.delete(item)
         self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
         self._outline_backup.pop(node.name, None)
         self.nodes.pop(node.name, None)
         self._active_node_name = None
+        self._record_history()
 
-    def _remove_connection(self, connection: Connection):
+    def _remove_connection(self, connection: Connection, record: bool = True):
         if connection.line_id:
             self.canvas.delete(connection.line_id)
         if connection.label_id:
             self.canvas.delete(connection.label_id)
         self.connections = [conn for conn in self.connections if conn is not connection]
+        if record:
+            self._record_history()
 
     def _remove_port(self, node: Node, port: Port):
         if port.canvas_id:
@@ -1466,8 +1559,9 @@ class DiagramApp:
         node.outputs = [p for p in node.outputs if p is not port]
         to_remove = [conn for conn in self.connections if conn.src == (node.name, port.name) or conn.dst == (node.name, port.name)]
         for conn in to_remove:
-            self._remove_connection(conn)
+            self._remove_connection(conn, record=False)
         self._update_connections()
+        self._record_history()
 
     def _toggle_ports(self):
         self._show_ports = not self._show_ports
@@ -1561,6 +1655,7 @@ class DiagramApp:
         node.resize_enabled = False
         self._redraw_node(node)
         self._mode = "normal"
+        self._record_history()
 
     def _handle_delete_port_click(self, event):
         if not self._active_node_name:
@@ -1594,6 +1689,7 @@ class DiagramApp:
             return
         node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
+        self._record_history()
 
     def _send_active_back(self):
         if not self._active_node_name:
@@ -1606,6 +1702,7 @@ class DiagramApp:
             return
         node.level, neighbor.level = neighbor.level, node.level
         self._apply_z_order(active_node_name=node.name)
+        self._record_history()
 
     def _apply_zoom(self, factor: float):
         if factor == 1.0:
@@ -1640,14 +1737,27 @@ class DiagramApp:
 
     def _zoom_in(self):
         self._apply_zoom(1.1)
+        self._record_history()
 
     def _zoom_out(self):
         self._apply_zoom(0.9)
+        self._record_history()
 
-    def _save_json(self):
+    def _on_zoom_wheel(self, event):
+        if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+            self._apply_zoom(1.1)
+        elif getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0:
+            self._apply_zoom(0.9)
+        else:
+            return
+        self._record_history()
+
+    def _build_payload(self, unscale: bool) -> dict[str, object]:
         def _unscale(value: float | None) -> float | None:
             if value is None:
                 return None
+            if not unscale:
+                return value
             return round(value / self._zoom_scale, 2)
 
         blocks = []
@@ -1698,7 +1808,92 @@ class DiagramApp:
                     "manual_mid_y": _unscale(connection.manual_mid_y),
                 }
             )
-        payload = {"blocks": blocks, "connections": connections, "wires": wires}
+        return {"blocks": blocks, "connections": connections, "wires": wires}
+
+    def _serialize_state(self) -> dict[str, object]:
+        payload = self._build_payload(unscale=False)
+        payload["zoom_scale"] = self._zoom_scale
+        return payload
+
+    def _record_history(self, initial: bool = False):
+        if self._suspend_history:
+            return
+        state = self._serialize_state()
+        if initial:
+            self._history = [state]
+            self._redo_stack = []
+            return
+        if self._history and self._history[-1] == state:
+            return
+        self._history.append(state)
+        self._redo_stack = []
+
+    def _load_state(self, state: dict[str, object]):
+        self._suspend_history = True
+        payload = {
+            "blocks": state.get("blocks", []),
+            "connections": state.get("connections", []),
+            "wires": state.get("wires", []),
+        }
+        self.nodes, self.connections = parse_data(payload)
+        self._zoom_scale = float(state.get("zoom_scale", 1.0))
+        self.canvas.delete("all")
+        self._port_items.clear()
+        self._selected_ports = []
+        self._active_node_name = None
+        self._outline_backup.clear()
+        self._mode = "normal"
+        for node in self.nodes.values():
+            self._draw_node(node)
+        for connection in self.connections:
+            self._draw_connection(connection)
+        self._apply_z_order()
+        self._update_connections()
+        self._suspend_history = False
+
+    def _undo(self):
+        if len(self._history) <= 1:
+            return
+        current = self._history.pop()
+        self._redo_stack.append(current)
+        self._load_state(self._history[-1])
+
+    def _redo(self):
+        if not self._redo_stack:
+            return
+        state = self._redo_stack.pop()
+        self._history.append(state)
+        self._load_state(state)
+
+    def _open_guide(self):
+        window = tk.Toplevel(self.root)
+        window.title("Guide")
+        window.configure(bg="white")
+        text = (
+            "Buttons & Shortcuts\n"
+            "- NEW (I): create a new block or gate.\n"
+            "- EDIT (Q): edit the selected block.\n"
+            "- REMOVE (Del): delete the selected block or gate.\n"
+            "- SAVE (Ctrl+S): save to input.json.\n"
+            "- CONNECT (W): connect ports (click empty space to add a bend).\n"
+            "- DISCONNECT: click a wire to remove it.\n"
+            "- WIRE NAME (L): click a wire to name it.\n"
+            "- CREATE PORT (P): add a port on the selected block edge.\n"
+            "- DELETE PORT (Ctrl+Del): remove a port on the selected block.\n"
+            "- SHOW/HIDE PORT (`): toggle port visibility.\n"
+            "- BRING FRONT (F): move block forward.\n"
+            "- SEND BACK (B): move block backward.\n"
+            "- ZOOM IN/OUT (Ctrl+Wheel): zoom with the mouse wheel.\n"
+            "- UNDO/REDO: Ctrl+Z / Ctrl+Y.\n"
+            "\n"
+            "Tips\n"
+            "- Double-click a block or gate to toggle resize mode.\n"
+        )
+        label = tk.Label(window, text=text, justify="left", bg="white", font=("Arial", 10))
+        label.pack(padx=12, pady=12)
+
+    def _save_json(self):
+        payload = self._build_payload(unscale=True)
         self.input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def _gate_types(self) -> list[str]:
@@ -1817,8 +2012,7 @@ def _normalize_levels(nodes: dict[str, Node], order: list[str]):
         nodes[name].level = idx
 
 
-def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connection]]:
     blocks = data.get("blocks", [])
     connections_data = data.get("connections", [])
     wires_data = data.get("wires", [])
@@ -1924,6 +2118,11 @@ def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
                     break
 
     return nodes, connections
+
+
+def parse_json(path: Path) -> tuple[dict[str, Node], list[Connection]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return parse_data(data)
 
 
 def validate_connections(nodes: dict[str, Node], connections: list[Connection], log_path: Path) -> bool:
