@@ -883,7 +883,7 @@ class DiagramApp:
             return "horizontal"
         if src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
             return "vertical"
-        if src_side in ("left", "right"):
+        if dst_side in ("left", "right"):
             return "horizontal"
         return "vertical"
 
@@ -1049,7 +1049,7 @@ class DiagramApp:
             return
         if connection.waypoints:
             coords = self._connection_line_coords(connection)
-            if not coords or len(coords) < 8:
+            if not coords or len(coords) < 6:
                 return
             points = [(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
             n = len(points)
@@ -1576,12 +1576,10 @@ class DiagramApp:
                 if src_port_id:
                     if waypoints:
                         last_x, last_y = waypoints[-1]
-                    else:
-                        last_x, last_y = self._port_center(src_port_id)
-                    cur_dir = self._current_wire_direction()
-                    if cur_dir == "vertical":
-                        if last_x != dest_x:
-                            waypoints.append((last_x, dest_y))
+                        cur_dir = self._current_wire_direction()
+                        if cur_dir == "vertical":
+                            if last_x != dest_x:
+                                waypoints.append((last_x, dest_y))
             if waypoints:
                 connection.waypoints = waypoints
             self.connections.append(connection)
