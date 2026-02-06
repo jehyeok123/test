@@ -143,6 +143,8 @@ class DiagramApp:
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
         self.wire_name_button.pack(side=tk.LEFT, padx=2)
 
+        self.resize_button = ttk.Button(self.toolbar_row2, text="BLOCK RESIZE (S)", command=self._toggle_resize_active_node, style="Tool.TButton")
+        self.resize_button.pack(side=tk.LEFT, padx=2)
         self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (A)", command=self._toggle_create_port_mode, style="Tool.TButton")
         self.create_port_button.pack(side=tk.LEFT, padx=2)
         self.delete_port_button = ttk.Button(
@@ -881,7 +883,9 @@ class DiagramApp:
             return "horizontal"
         if src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
             return "vertical"
-        return "orthogonal"
+        if src_side in ("left", "right"):
+            return "horizontal"
+        return "vertical"
 
     def _connection_manual_locked(self, connection: Connection) -> bool:
         if connection.manual_mid_x is not None or connection.manual_mid_y is not None:
@@ -922,10 +926,6 @@ class DiagramApp:
                 return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
             if orientation == "vertical":
                 return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
-            if orientation == "orthogonal":
-                dst_side = self._port_side((dst_node, dst_port))
-                prefer_vertical_end = dst_side in ("top", "bottom") if dst_side else False
-                return self._connection_coords_orthogonal((x1, y1), (x2, y2), prefer_vertical_end)
             return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
         if connection.dst:
             dst_node, dst_port = connection.dst
@@ -1106,23 +1106,6 @@ class DiagramApp:
                     return
             return
         orientation = self._connection_orientation(connection)
-        if orientation == "orthogonal":
-            if not connection.src or not connection.dst:
-                return
-            h_x1, h_x2, h_y, v_x, v_y1, v_y2 = self._orthogonal_segments(coords)
-            if self._near_horizontal_segment(event.x, event.y, h_x1, h_x2, h_y):
-                connection.manual_mid_y = h_y
-                self._drag_wire["connection"] = connection
-                self._drag_wire["offset"] = event.y - h_y
-                self._drag_wire["mode"] = "mid_y"
-                return
-            if self._near_vertical_segment(event.x, event.y, v_x, v_y1, v_y2):
-                connection.manual_mid_x = v_x
-                self._drag_wire["connection"] = connection
-                self._drag_wire["offset"] = event.x - v_x
-                self._drag_wire["mode"] = "mid"
-                return
-            return
         if orientation == "vertical":
             mid_y = coords[3]
             x1 = coords[2]
@@ -1204,8 +1187,6 @@ class DiagramApp:
             return
         mode = self._drag_wire["mode"]
         if mode == "mid":
-            if self._connection_manual_locked(connection):
-                return
             raw_mid = event.x - self._drag_wire["offset"]
             connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
             if not connection.src or not connection.dst:
@@ -1220,8 +1201,6 @@ class DiagramApp:
             self.canvas.coords(connection.line_id, *coords)
             return
         if mode == "mid_y":
-            if self._connection_manual_locked(connection):
-                return
             raw_mid = event.y - self._drag_wire["offset"]
             connection.manual_mid_y = self._snap_to_step(raw_mid, self.MID_STEP)
             if not connection.src or not connection.dst:
@@ -1234,15 +1213,6 @@ class DiagramApp:
             x2, y2 = self._port_center(dst_id)
             coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             self.canvas.coords(connection.line_id, *coords)
-            return
-        if mode in ("orth_move_lr", "orth_move_tb"):
-            if self._mode != "normal":
-                return
-            node = self._drag_wire["node"]
-            port = self._drag_wire["port"]
-            if not node or not port:
-                return
-            self._move_port(node, port, event.x, event.y)
             return
         if mode in ("src_port", "dst_port"):
             if self._mode != "normal":
@@ -1338,6 +1308,10 @@ class DiagramApp:
         mode_text = mode_map.get(self._mode, self._mode)
         if self._delete_mode:
             mode_text = "delete"
+        if self._active_node_name and self._mode == "normal":
+            node = self.nodes.get(self._active_node_name)
+            if node and node.resize_enabled:
+                mode_text = "resize"
         self._status_mode_label.config(text=f"Mode: {mode_text}")
         sel_text = ""
         if self._selected_wire:
