@@ -368,46 +368,7 @@ class DiagramApp:
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         if node.kind != "BLOCK":
-            if node.kind in self._CUSTOM_GATE_KINDS:
-                self._draw_gate_custom(node)
-            else:
-                base_image = self._gate_base_image(node.kind)
-                if base_image and node.image_subsample <= 0:
-                    base_w = base_image.width()
-                    base_h = base_image.height()
-                    width_ratio = base_w / max(1, node.width)
-                    height_ratio = base_h / max(1, node.height)
-                    node.image_subsample = max(1, int(round(max(width_ratio, height_ratio))))
-                image = self._load_gate_image(node.kind, node.image_subsample)
-                if image:
-                    node.image = image
-                    node.width = image.width()
-                    node.height = image.height()
-                    node.base_height = node.height
-                    x2, y2 = node.x + node.width, node.y + node.height
-                    node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
-                    node.items.append(node.image_id)
-                    if node.resize_enabled:
-                        outline = self.canvas.create_rectangle(
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            outline="black",
-                            width=3,
-                        )
-                        node.items.append(outline)
-                else:
-                    rect = self.canvas.create_rectangle(
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        fill="white",
-                        outline="black",
-                        width=2,
-                    )
-                    node.items.append(rect)
+            self._draw_gate_custom(node)
         else:
             base_width = 4 if node.resize_enabled else 2
             outline_width = max(1, base_width * node.outline_scale)
