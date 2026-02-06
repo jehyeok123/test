@@ -1418,6 +1418,12 @@ class DiagramApp:
             return
         if self._mode in ("connect", "create_port", "delete_port", "wire_name"):
             self._reset_port_mode()
+        if self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node and node.resize_enabled:
+                node.resize_enabled = False
+                self._redraw_node(node)
+                self._update_connections()
         self._deselect_wire()
         self._deselect_label()
 
