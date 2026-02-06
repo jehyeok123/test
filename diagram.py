@@ -59,6 +59,7 @@ class Connection:
     label_x: float | None = None
     label_y: float | None = None
     waypoints: list[tuple[float, float]] = field(default_factory=list)
+    show_arrow: bool = True
 
 
 class DiagramApp:
@@ -132,14 +133,14 @@ class DiagramApp:
         self.new_button.pack(side=tk.LEFT, padx=2)
         self.edit_button = ttk.Button(self.toolbar_row1, text="EDIT (E)", command=self._open_edit_block, style="Tool.TButton")
         self.edit_button.pack(side=tk.LEFT, padx=2)
-        self.remove_button = ttk.Button(self.toolbar_row1, text="REMOVE", command=self._remove_active_node, style="Tool.TButton")
+        self.remove_button = ttk.Button(self.toolbar_row1, text="REMOVE (Del)", command=self._toggle_delete_mode, style="Tool.TButton")
         self.remove_button.pack(side=tk.LEFT, padx=2)
         self.save_button = ttk.Button(self.toolbar_row1, text="SAVE (Ctrl+S)", command=self._save_json, style="Tool.TButton")
         self.save_button.pack(side=tk.LEFT, padx=2)
+        self.save_png_button = ttk.Button(self.toolbar_row1, text="SAVE PNG (Ctrl+P)", command=self._save_png, style="Tool.TButton")
+        self.save_png_button.pack(side=tk.LEFT, padx=2)
         self.connect_button = ttk.Button(self.toolbar_row1, text="CONNECT (W)", command=self._toggle_connect_mode, style="Tool.TButton")
         self.connect_button.pack(side=tk.LEFT, padx=2)
-        self.disconnect_button = ttk.Button(self.toolbar_row1, text="DISCONNECT", command=self._toggle_disconnect_mode, style="Tool.TButton")
-        self.disconnect_button.pack(side=tk.LEFT, padx=2)
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
         self.wire_name_button.pack(side=tk.LEFT, padx=2)
 
@@ -244,6 +245,8 @@ class DiagramApp:
         self.root.bind("f", lambda _event: self._bring_active_front())
         self.root.bind("b", lambda _event: self._send_active_back())
         self.root.bind("<Escape>", lambda _event: self._handle_escape())
+        self.root.bind("<Control-p>", lambda _event: self._save_png())
+        self.root.bind("<Tab>", lambda _event: self._toggle_wire_arrow())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
         self._record_history(initial=True)
         self._schedule_status_update()
@@ -339,7 +342,7 @@ class DiagramApp:
         line = self.canvas.create_line(
             *coords,
             smooth=False,
-            arrow=tk.LAST,
+            arrow=tk.LAST if connection.show_arrow else tk.NONE,
             width=2,
             fill="#333333",
         )
@@ -993,18 +996,6 @@ class DiagramApp:
             self._open_label_dialog(connection, is_new=True)
             self._toggle_wire_name_mode()
             return
-        if self._mode == "disconnect":
-            item = self.canvas.find_withtag("current")
-            if not item:
-                return
-            line_id = item[0]
-            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
-            if not connection:
-                return
-            self._remove_connection(connection)
-            self._record_history()
-            self._toggle_disconnect_mode()
-            return
         if self._mode != "normal":
             return
         self._deselect_label()
@@ -1351,7 +1342,6 @@ class DiagramApp:
         mode_map = {
             "normal": "normal",
             "connect": "connect",
-            "disconnect": "disconnect",
             "create_port": "create port",
             "delete_port": "delete port",
             "wire_name": "label",
@@ -1363,6 +1353,8 @@ class DiagramApp:
             node = self.nodes.get(self._active_node_name)
             if node and node.resize_enabled:
                 mode_text = "resize"
+        if getattr(self, "_save_flash", False):
+            mode_text = "save"
         self._status_mode_label.config(text=f"Mode: {mode_text}")
         sel_text = ""
         if self._selected_wire:
@@ -1424,7 +1416,7 @@ class DiagramApp:
         if self._delete_mode:
             self._toggle_delete_mode()
             return
-        if self._mode in ("connect", "disconnect", "create_port", "delete_port", "wire_name"):
+        if self._mode in ("connect", "create_port", "delete_port", "wire_name"):
             self._reset_port_mode()
         self._deselect_wire()
         self._deselect_label()
@@ -1882,8 +1874,6 @@ class DiagramApp:
         if self._mode == "connect":
             self._reset_connect_mode()
             return
-        if self._mode == "disconnect":
-            self._toggle_disconnect_mode()
         if self._mode in ("create_port", "delete_port", "wire_name"):
             self._reset_port_mode()
         self._mode = "connect"
@@ -1900,17 +1890,6 @@ class DiagramApp:
         self._set_all_port_colors("black")
         self._mode = "normal"
 
-    def _toggle_disconnect_mode(self):
-        if self._mode == "disconnect":
-            self._set_all_wire_colors("#333333")
-            self._mode = "normal"
-            return
-        if self._mode == "connect":
-            self._reset_connect_mode()
-        if self._mode in ("create_port", "delete_port", "wire_name"):
-            self._reset_port_mode()
-        self._mode = "disconnect"
-        self._set_all_wire_colors("red")
 
     def _current_wire_direction(self) -> str:
         direction = self._wire_direction or "horizontal"
@@ -1957,7 +1936,7 @@ class DiagramApp:
             self._delete_mode = False
             self._mode = "normal"
             return
-        if self._mode in ("connect", "disconnect", "create_port", "delete_port", "wire_name"):
+        if self._mode in ("connect", "create_port", "delete_port", "wire_name"):
             self._reset_port_mode()
         self._delete_mode = True
         self._delete_blink_on = False
@@ -2129,7 +2108,7 @@ class DiagramApp:
             return
         if not self._active_node_name:
             return
-        if self._mode in ("connect", "disconnect", "delete_port", "wire_name"):
+        if self._mode in ("connect", "delete_port", "wire_name"):
             self._reset_port_mode()
         self._mode = "create_port"
         node = self.nodes.get(self._active_node_name)
@@ -2152,7 +2131,7 @@ class DiagramApp:
             return
         if not self._active_node_name:
             return
-        if self._mode in ("connect", "disconnect", "create_port", "wire_name"):
+        if self._mode in ("connect", "create_port", "wire_name"):
             self._reset_port_mode()
         self._mode = "delete_port"
         node = self.nodes.get(self._active_node_name)
@@ -2166,18 +2145,20 @@ class DiagramApp:
 
     def _toggle_wire_name_mode(self):
         if self._mode == "wire_name":
-            self._set_all_wire_colors("#333333")
             self._mode = "normal"
             return
         if self._selected_wire:
             self._open_label_dialog(self._selected_wire, is_new=(self._selected_wire.label is None))
             return
+        if self._mode == "connect":
+            self._reset_connect_mode()
+        if self._mode in ("create_port", "delete_port"):
+            self._reset_port_mode()
+        self._mode = "wire_name"
 
     def _reset_port_mode(self):
         if self._mode == "connect":
             self._reset_connect_mode()
-        if self._mode == "disconnect":
-            self._set_all_wire_colors("#333333")
         if self._mode == "create_port" and self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node:
@@ -2412,6 +2393,8 @@ class DiagramApp:
                 wire_data["label_x"] = _unscale(connection.label_x)
             if connection.label_y is not None:
                 wire_data["label_y"] = _unscale(connection.label_y)
+            if not connection.show_arrow:
+                wire_data["show_arrow"] = False
             wires.append(wire_data)
         return {"blocks": blocks, "connections": connections, "wires": wires}
 
@@ -2510,6 +2493,36 @@ class DiagramApp:
     def _save_json(self):
         payload = self._build_payload(unscale=True)
         self.input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._save_flash = True
+        if hasattr(self, "_save_flash_job") and self._save_flash_job:
+            self.root.after_cancel(self._save_flash_job)
+        self._save_flash_job = self.root.after(1500, self._clear_save_flash)
+
+    def _clear_save_flash(self):
+        self._save_flash = False
+        self._save_flash_job = None
+
+    def _save_png(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+            title="Save PNG",
+        )
+        if path:
+            self.save_diagram(Path(path))
+
+    def _toggle_wire_arrow(self):
+        if not self._selected_wire:
+            return
+        connection = self._selected_wire
+        connection.show_arrow = not connection.show_arrow
+        if connection.line_id:
+            self.canvas.itemconfigure(
+                connection.line_id,
+                arrow=tk.LAST if connection.show_arrow else tk.NONE,
+            )
+        self._record_history()
 
     def _gate_types(self) -> list[str]:
         return list(self._gate_definitions().keys())
@@ -2741,6 +2754,8 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.label_x = float(wire["label_x"])
                     if "label_y" in wire and wire["label_y"] is not None:
                         connection.label_y = float(wire["label_y"])
+                    if "show_arrow" in wire:
+                        connection.show_arrow = bool(wire["show_arrow"])
                     break
 
     return nodes, connections
