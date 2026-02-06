@@ -2041,6 +2041,11 @@ class DiagramApp:
             if connection.line_id:
                 self.canvas.itemconfig(connection.line_id, fill=color)
 
+    def _set_all_wire_widths(self, width: int):
+        for connection in self.connections:
+            if connection.line_id:
+                self.canvas.itemconfig(connection.line_id, width=width)
+
     def _remove_active_node(self):
         if not self._active_node_name:
             return
@@ -2145,6 +2150,8 @@ class DiagramApp:
 
     def _toggle_wire_name_mode(self):
         if self._mode == "wire_name":
+            self._set_all_wire_widths(2)
+            self._set_all_wire_colors("#333333")
             self._mode = "normal"
             return
         if self._selected_wire:
@@ -2155,6 +2162,8 @@ class DiagramApp:
         if self._mode in ("create_port", "delete_port"):
             self._reset_port_mode()
         self._mode = "wire_name"
+        self._set_all_wire_colors("blue")
+        self._set_all_wire_widths(4)
 
     def _reset_port_mode(self):
         if self._mode == "connect":
@@ -2175,6 +2184,7 @@ class DiagramApp:
                 self._redraw_node(node)
         if self._mode == "wire_name":
             self._set_all_wire_colors("#333333")
+            self._set_all_wire_widths(2)
         self._mode = "normal"
 
     def _handle_create_port_click(self, event):
@@ -2570,15 +2580,17 @@ class DiagramApp:
 
     def save_diagram(self, path: Path):
         self.root.update()
-        ps_path = path.with_suffix(".ps")
-        self.canvas.postscript(file=ps_path, colormode="color")
         try:
-            from PIL import Image
+            from PIL import ImageGrab
 
-            img = Image.open(ps_path)
+            x = self.canvas.winfo_rootx()
+            y = self.canvas.winfo_rooty()
+            w = self.canvas.winfo_width()
+            h = self.canvas.winfo_height()
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
             img.save(path)
         except Exception as exc:
-            print(f"PNG 저장 실패: {exc}. PostScript 파일로 저장합니다: {ps_path}")
+            print(f"PNG 저장 실패: {exc}")
 
     def run(self):
         self.root.mainloop()
