@@ -253,83 +253,90 @@ class DiagramApp:
 
     _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF")
 
+    def _render_gate_image(self, kind: str, w: int, h: int) -> "tk.PhotoImage | None":
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageTk
+        except ImportError:
+            return None
+        scale = 3
+        sw, sh = w * scale, h * scale
+        img = Image.new("RGBA", (sw, sh), (255, 255, 255, 0))
+        draw = ImageDraw.Draw(img)
+        lw = 2 * scale
+
+        def _font(size, bold=False):
+            weight = "bold" if bold else ""
+            for name in ("DejaVuSans.ttf", "arial.ttf"):
+                try:
+                    return ImageFont.truetype(name, size * scale)
+                except Exception:
+                    pass
+            try:
+                return ImageFont.load_default(size=size * scale)
+            except Exception:
+                return ImageFont.load_default()
+
+        if kind.startswith("MUX"):
+            indent = int(sh * 0.2)
+            points = [(0, 0), (sw, indent), (sw, sh - indent), (0, sh)]
+            draw.polygon(points, fill="white", outline="black", width=lw)
+            n_label = kind.split("_")[1]
+            draw.text((sw * 0.4, sh * 0.38), "MUX", fill="black", font=_font(8, True), anchor="mm")
+            draw.text((sw * 0.4, sh * 0.62), n_label, fill="black", font=_font(7), anchor="mm")
+
+        elif kind.startswith("DEMUX"):
+            indent = int(sh * 0.2)
+            points = [(0, indent), (sw, 0), (sw, sh), (0, sh - indent)]
+            draw.polygon(points, fill="white", outline="black", width=lw)
+            n_label = kind.split("_")[1]
+            draw.text((sw * 0.6, sh * 0.38), "DEMUX", fill="black", font=_font(7, True), anchor="mm")
+            draw.text((sw * 0.6, sh * 0.62), n_label, fill="black", font=_font(7), anchor="mm")
+
+        elif kind == "DFF":
+            draw.rectangle([0, 0, sw - 1, sh - 1], fill="white", outline="black", width=lw)
+            draw.text((10 * scale, int(sh * 0.33)), "D", fill="black", font=_font(9, True), anchor="mm")
+            draw.text((sw - 10 * scale, int(sh * 0.33)), "Q", fill="black", font=_font(9, True), anchor="mm")
+            tri_y = int(sh * 0.67)
+            tri_s = 8 * scale
+            tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
+            draw.polygon(tri_points, fill="white", outline="black", width=max(1, scale))
+
+        img = img.resize((w, h), Image.LANCZOS)
+        return ImageTk.PhotoImage(img)
+
     def _draw_gate_custom(self, node: Node):
         x1, y1 = node.x, node.y
         w, h = node.width, node.height
-        x2, y2 = x1 + w, y1 + h
         kind = node.kind
-        lw = 2
 
-        if kind.startswith("MUX"):
-            indent = h * 0.2
-            poly = self.canvas.create_polygon(
-                x1, y1,
-                x2, y1 + indent,
-                x2, y2 - indent,
-                x1, y2,
-                fill="white", outline="black", width=lw,
-            )
-            node.items.append(poly)
-            label = self.canvas.create_text(
-                x1 + w * 0.4, (y1 + y2) / 2,
-                text="MUX", font=("Arial", 8, "bold"), anchor="center",
-            )
-            node.items.append(label)
-            n = kind.split("_")[1]
-            size_label = self.canvas.create_text(
-                x1 + w * 0.4, (y1 + y2) / 2 + 12,
-                text=n, font=("Arial", 7), anchor="center",
-            )
-            node.items.append(size_label)
-
-        elif kind.startswith("DEMUX"):
-            indent = h * 0.2
-            poly = self.canvas.create_polygon(
-                x1, y1 + indent,
-                x2, y1,
-                x2, y2,
-                x1, y2 - indent,
-                fill="white", outline="black", width=lw,
-            )
-            node.items.append(poly)
-            label = self.canvas.create_text(
-                x1 + w * 0.6, (y1 + y2) / 2,
-                text="DEMUX", font=("Arial", 7, "bold"), anchor="center",
-            )
-            node.items.append(label)
-            n = kind.split("_")[1]
-            size_label = self.canvas.create_text(
-                x1 + w * 0.6, (y1 + y2) / 2 + 12,
-                text=n, font=("Arial", 7), anchor="center",
-            )
-            node.items.append(size_label)
-
-        elif kind == "DFF":
-            rect = self.canvas.create_rectangle(
-                x1, y1, x2, y2,
-                fill="white", outline="black", width=lw,
-            )
-            node.items.append(rect)
-            d_label = self.canvas.create_text(
-                x1 + 10, y1 + h * 0.33,
-                text="D", font=("Arial", 9, "bold"), anchor="center",
-            )
-            node.items.append(d_label)
-            q_label = self.canvas.create_text(
-                x2 - 10, y1 + h * 0.33,
-                text="Q", font=("Arial", 9, "bold"), anchor="center",
-            )
-            node.items.append(q_label)
-            tri_x = x1
-            tri_y = y1 + h * 0.67
-            tri_size = 8
-            tri = self.canvas.create_polygon(
-                tri_x, tri_y - tri_size,
-                tri_x + tri_size, tri_y,
-                tri_x, tri_y + tri_size,
-                fill="", outline="black", width=1,
-            )
-            node.items.append(tri)
+        gate_img = self._render_gate_image(kind, w, h)
+        if gate_img:
+            node.image = gate_img
+            node.image_id = self.canvas.create_image(x1, y1, image=gate_img, anchor="nw")
+            node.items.append(node.image_id)
+        else:
+            x2, y2 = x1 + w, y1 + h
+            lw = 2
+            if kind.startswith("MUX"):
+                indent = h * 0.2
+                poly = self.canvas.create_polygon(
+                    x1, y1, x2, y1 + indent, x2, y2 - indent, x1, y2,
+                    fill="white", outline="black", width=lw,
+                )
+                node.items.append(poly)
+            elif kind.startswith("DEMUX"):
+                indent = h * 0.2
+                poly = self.canvas.create_polygon(
+                    x1, y1 + indent, x2, y1, x2, y2, x1, y2 - indent,
+                    fill="white", outline="black", width=lw,
+                )
+                node.items.append(poly)
+            elif kind == "DFF":
+                rect = self.canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill="white", outline="black", width=lw,
+                )
+                node.items.append(rect)
 
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
