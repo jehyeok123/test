@@ -199,7 +199,6 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
         self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
-        self.canvas.tag_bind("wire", "<Double-Button-1>", self._on_wire_double_click)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
         self.canvas.tag_bind("label", "<ButtonPress-1>", self._on_label_press)
@@ -423,6 +422,11 @@ class DiagramApp:
 
     def _on_canvas_press(self, event):
         if self._mode != "connect":
+            item = self.canvas.find_withtag("current")
+            if item:
+                tags = self.canvas.gettags(item[0])
+                if "label" in tags or "wire" in tags:
+                    return
             self._deselect_wire()
             self._deselect_label()
             return
@@ -992,8 +996,9 @@ class DiagramApp:
         connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
         if not connection:
             return
-        if self._selected_wire is not connection:
-            return
+        self._deselect_wire()
+        self._selected_wire = connection
+        self.canvas.itemconfigure(line_id, width=4)
         coords = self._connection_line_coords(connection)
         if not coords:
             return
@@ -2082,6 +2087,9 @@ class DiagramApp:
         if self._mode == "wire_name":
             self._set_all_wire_colors("#333333")
             self._mode = "normal"
+            return
+        if self._selected_wire:
+            self._open_label_dialog(self._selected_wire, is_new=(self._selected_wire.label is None))
             return
         if self._mode in ("connect", "disconnect", "create_port", "delete_port"):
             self._reset_port_mode()
