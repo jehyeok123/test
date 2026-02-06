@@ -1048,6 +1048,7 @@ class DiagramApp:
                             self._drag_wire["connection"] = connection
                             self._drag_wire["mode"] = "src_port"
                             self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            self._drag_wire["seg_dir"] = "h"
                             return
                     if is_last and connection.dst:
                         port_info = self._find_port(connection.dst[0], connection.dst[1])
@@ -1055,6 +1056,7 @@ class DiagramApp:
                             self._drag_wire["connection"] = connection
                             self._drag_wire["mode"] = "dst_port"
                             self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            self._drag_wire["seg_dir"] = "h"
                             return
                     self._drag_wire["connection"] = connection
                     self._drag_wire["mode"] = "wp_h"
@@ -1069,6 +1071,7 @@ class DiagramApp:
                             self._drag_wire["connection"] = connection
                             self._drag_wire["mode"] = "src_port"
                             self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            self._drag_wire["seg_dir"] = "v"
                             return
                     if is_last and connection.dst:
                         port_info = self._find_port(connection.dst[0], connection.dst[1])
@@ -1076,6 +1079,7 @@ class DiagramApp:
                             self._drag_wire["connection"] = connection
                             self._drag_wire["mode"] = "dst_port"
                             self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            self._drag_wire["seg_dir"] = "v"
                             return
                     self._drag_wire["connection"] = connection
                     self._drag_wire["mode"] = "wp_v"
@@ -1243,6 +1247,16 @@ class DiagramApp:
             if not node or not port:
                 return
             self._move_port(node, port, event.x, event.y)
+            seg_dir = self._drag_wire.get("seg_dir")
+            if seg_dir and connection.waypoints and port.canvas_id:
+                px, py = self._port_center(port.canvas_id)
+                wp_idx = 0 if mode == "src_port" else -1
+                wx, wy = connection.waypoints[wp_idx]
+                if seg_dir == "h":
+                    connection.waypoints[wp_idx] = (wx, py)
+                else:
+                    connection.waypoints[wp_idx] = (px, wy)
+                self._update_connections()
             return
         if mode in ("wp_h", "wp_v"):
             seg_idx = self._drag_wire.get("seg_index")
@@ -1273,6 +1287,7 @@ class DiagramApp:
         self._drag_wire["node"] = None
         self._drag_wire.pop("seg_index", None)
         self._drag_wire.pop("points", None)
+        self._drag_wire.pop("seg_dir", None)
 
     def _on_wire_double_click(self, event):
         if self._mode != "normal":
@@ -2091,10 +2106,6 @@ class DiagramApp:
         if self._selected_wire:
             self._open_label_dialog(self._selected_wire, is_new=(self._selected_wire.label is None))
             return
-        if self._mode in ("connect", "disconnect", "create_port", "delete_port"):
-            self._reset_port_mode()
-        self._mode = "wire_name"
-        self._set_all_wire_colors("blue")
 
     def _reset_port_mode(self):
         if self._mode == "connect":
