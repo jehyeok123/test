@@ -251,46 +251,130 @@ class DiagramApp:
         self._record_history(initial=True)
         self._schedule_status_update()
 
+    _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF")
+
+    def _draw_gate_custom(self, node: Node):
+        x1, y1 = node.x, node.y
+        w, h = node.width, node.height
+        x2, y2 = x1 + w, y1 + h
+        kind = node.kind
+        lw = 2
+
+        if kind.startswith("MUX"):
+            indent = h * 0.2
+            poly = self.canvas.create_polygon(
+                x1, y1,
+                x2, y1 + indent,
+                x2, y2 - indent,
+                x1, y2,
+                fill="white", outline="black", width=lw,
+            )
+            node.items.append(poly)
+            label = self.canvas.create_text(
+                x1 + w * 0.4, (y1 + y2) / 2,
+                text="MUX", font=("Arial", 8, "bold"), anchor="center",
+            )
+            node.items.append(label)
+            n = kind.split("_")[1]
+            size_label = self.canvas.create_text(
+                x1 + w * 0.4, (y1 + y2) / 2 + 12,
+                text=n, font=("Arial", 7), anchor="center",
+            )
+            node.items.append(size_label)
+
+        elif kind.startswith("DEMUX"):
+            indent = h * 0.2
+            poly = self.canvas.create_polygon(
+                x1, y1 + indent,
+                x2, y1,
+                x2, y2,
+                x1, y2 - indent,
+                fill="white", outline="black", width=lw,
+            )
+            node.items.append(poly)
+            label = self.canvas.create_text(
+                x1 + w * 0.6, (y1 + y2) / 2,
+                text="DEMUX", font=("Arial", 7, "bold"), anchor="center",
+            )
+            node.items.append(label)
+            n = kind.split("_")[1]
+            size_label = self.canvas.create_text(
+                x1 + w * 0.6, (y1 + y2) / 2 + 12,
+                text=n, font=("Arial", 7), anchor="center",
+            )
+            node.items.append(size_label)
+
+        elif kind == "DFF":
+            rect = self.canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill="white", outline="black", width=lw,
+            )
+            node.items.append(rect)
+            d_label = self.canvas.create_text(
+                x1 + 10, y1 + h * 0.33,
+                text="D", font=("Arial", 9, "bold"), anchor="center",
+            )
+            node.items.append(d_label)
+            q_label = self.canvas.create_text(
+                x2 - 10, y1 + h * 0.33,
+                text="Q", font=("Arial", 9, "bold"), anchor="center",
+            )
+            node.items.append(q_label)
+            tri_x = x1
+            tri_y = y1 + h * 0.67
+            tri_size = 8
+            tri = self.canvas.create_polygon(
+                tri_x, tri_y - tri_size,
+                tri_x + tri_size, tri_y,
+                tri_x, tri_y + tri_size,
+                fill="", outline="black", width=1,
+            )
+            node.items.append(tri)
+
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         if node.kind != "BLOCK":
-            base_image = self._gate_base_image(node.kind)
-            if base_image and node.image_subsample <= 0:
-                base_w = base_image.width()
-                base_h = base_image.height()
-                width_ratio = base_w / max(1, node.width)
-                height_ratio = base_h / max(1, node.height)
-                node.image_subsample = max(1, int(round(max(width_ratio, height_ratio))))
-            image = self._load_gate_image(node.kind, node.image_subsample)
-            if image:
-                node.image = image
-                node.width = image.width()
-                node.height = image.height()
-                node.base_height = node.height
-                x2, y2 = node.x + node.width, node.y + node.height
-                node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
-                node.items.append(node.image_id)
-                if node.resize_enabled:
-                    outline = self.canvas.create_rectangle(
+            if node.kind in self._CUSTOM_GATE_KINDS:
+                self._draw_gate_custom(node)
+            else:
+                base_image = self._gate_base_image(node.kind)
+                if base_image and node.image_subsample <= 0:
+                    base_w = base_image.width()
+                    base_h = base_image.height()
+                    width_ratio = base_w / max(1, node.width)
+                    height_ratio = base_h / max(1, node.height)
+                    node.image_subsample = max(1, int(round(max(width_ratio, height_ratio))))
+                image = self._load_gate_image(node.kind, node.image_subsample)
+                if image:
+                    node.image = image
+                    node.width = image.width()
+                    node.height = image.height()
+                    node.base_height = node.height
+                    x2, y2 = node.x + node.width, node.y + node.height
+                    node.image_id = self.canvas.create_image(x1, y1, image=image, anchor="nw")
+                    node.items.append(node.image_id)
+                    if node.resize_enabled:
+                        outline = self.canvas.create_rectangle(
+                            x1,
+                            y1,
+                            x2,
+                            y2,
+                            outline="black",
+                            width=3,
+                        )
+                        node.items.append(outline)
+                else:
+                    rect = self.canvas.create_rectangle(
                         x1,
                         y1,
                         x2,
                         y2,
+                        fill="white",
                         outline="black",
-                        width=3,
+                        width=2,
                     )
-                    node.items.append(outline)
-            else:
-                rect = self.canvas.create_rectangle(
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    outline="black",
-                    width=2,
-                )
-                node.items.append(rect)
+                    node.items.append(rect)
         else:
             base_width = 4 if node.resize_enabled else 2
             outline_width = max(1, base_width * node.outline_scale)
@@ -425,7 +509,7 @@ class DiagramApp:
                 self._resize_data["mode"] = resize_mode
                 self._resize_data["x"] = event.x
                 self._resize_data["y"] = event.y
-                if node.kind == "BLOCK":
+                if node.kind == "BLOCK" or node.kind in self._CUSTOM_GATE_KINDS:
                     self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
                 else:
                     self._resize_data["orig"] = (
@@ -588,7 +672,7 @@ class DiagramApp:
         orig = self._resize_data["orig"]
         if not node or not mode or not orig:
             return
-        if node.kind != "BLOCK":
+        if node.kind != "BLOCK" and node.kind not in self._CUSTOM_GATE_KINDS:
             self._resize_gate(node, mode, orig, event)
             return
         orig_x, orig_y, orig_width, orig_height = orig
@@ -2633,11 +2717,11 @@ class DiagramApp:
             "OR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
             "XOR2": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
             "XOR4": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
-            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
-            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 50},
-            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 50},
-            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 50},
-            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 50},
+            "MUX_2x1": {"inputs": 2, "outputs": 1, "width": 60, "height": 60},
+            "MUX_4x1": {"inputs": 4, "outputs": 1, "width": 60, "height": 90},
+            "DEMUX_1x2": {"inputs": 1, "outputs": 2, "width": 60, "height": 60},
+            "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 90},
+            "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 60},
             "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 50},
         }
 
@@ -2688,6 +2772,13 @@ class DiagramApp:
                             ex, ey = points[-1]
                             px, py = points[-2]
                             self._draw_arrowhead(draw, px, py, ex, ey, fill, lw)
+                elif item_type == "polygon":
+                    fill = _color(self.canvas.itemcget(item_id, "fill"))
+                    outline = _color(self.canvas.itemcget(item_id, "outline")) or "black"
+                    lw = max(1, int(float(self.canvas.itemcget(item_id, "width") or 1)))
+                    points = [(tc[i], tc[i + 1]) for i in range(0, len(tc), 2)]
+                    if len(points) >= 3:
+                        draw.polygon(points, fill=fill, outline=outline, width=lw)
                 elif item_type == "oval":
                     fill = _color(self.canvas.itemcget(item_id, "fill"))
                     outline = _color(self.canvas.itemcget(item_id, "outline")) or "black"
