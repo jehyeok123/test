@@ -1,7 +1,6 @@
 import json
 import sys
 import tkinter as tk
-from types import SimpleNamespace
 from tkinter import simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -171,9 +170,6 @@ class DiagramApp:
         self._redo_stack: list[dict[str, object]] = []
         self._pending_midpoints: list[tuple[float, float]] = []
         self._suspend_history = False
-        self._hover_edge: tuple[Node, str] | None = None
-        self._edge_highlight_id: int | None = None
-        self._edge_resize: dict[str, object] = {"node": None, "edge": None, "orig": None}
         self._delete_mode = False
         self._delete_blink_on = False
         self._delete_blink_job: str | None = None
@@ -192,6 +188,7 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
+        self.canvas.tag_bind("node", "<Double-Button-1>", self._on_toggle_resize)
         self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
@@ -209,7 +206,6 @@ class DiagramApp:
         self.root.bind("<Control-s>", lambda _event: self._save_json())
         self.root.bind("<Control-z>", lambda _event: self._undo())
         self.root.bind("<Control-y>", lambda _event: self._redo())
-        self.root.bind("s", lambda _event: self._start_edge_resize())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("a", lambda _event: self._toggle_create_port_mode())
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
@@ -343,9 +339,6 @@ class DiagramApp:
         return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _on_press(self, event):
-        if self._edge_resize["node"] is not None:
-            self._finish_edge_resize()
-            return
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -409,9 +402,6 @@ class DiagramApp:
         self._drag_data["y"] = event.y
 
     def _on_canvas_press(self, event):
-        if self._edge_resize["node"] is not None:
-            self._finish_edge_resize()
-            return
         if self._mode != "connect":
             return
         if len(self._selected_ports) != 1:
@@ -425,36 +415,8 @@ class DiagramApp:
         self._update_wire_preview(event.x, event.y)
 
     def _on_canvas_motion(self, event):
-        if self._edge_resize["node"] is not None:
-            self._resize_from_edge(event)
-            return
         if self._mode == "connect" and len(self._selected_ports) == 1:
             self._update_wire_preview(event.x, event.y)
-        if self._mode != "normal" or self._delete_mode:
-            self._clear_edge_highlight()
-            return
-        item = self.canvas.find_withtag("current")
-        if not item:
-            self._clear_edge_highlight()
-            return
-        tags = self.canvas.gettags(item[0])
-        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
-        if not node_tag:
-            self._clear_edge_highlight()
-            return
-        node_name = node_tag.split(":", 1)[1]
-        node = self.nodes.get(node_name)
-        if not node:
-            self._clear_edge_highlight()
-            return
-        edge = self._edge_for_point(node, event.x, event.y)
-        if not edge:
-            self._clear_edge_highlight()
-            return
-        if self._hover_edge and self._hover_edge == (node, edge):
-            return
-        self._hover_edge = (node, edge)
-        self._draw_edge_highlight(node, edge)
 
     def _on_release(self, _event):
         if self._drag_data["node"] and not self._resize_data["node"]:
@@ -463,95 +425,6 @@ class DiagramApp:
         self._resize_data["node"] = None
         self._resize_data["mode"] = None
         self._resize_data["orig"] = None
-
-    def _draw_edge_highlight(self, node: Node, edge: str, color: str = "black"):
-        self._clear_edge_highlight()
-        x1, y1 = node.x, node.y
-        x2, y2 = node.x + node.width, node.y + node.height
-        if edge == "top":
-            coords = (x1, y1, x2, y1)
-        elif edge == "bottom":
-            coords = (x1, y2, x2, y2)
-        elif edge == "left":
-            coords = (x1, y1, x1, y2)
-        else:
-            coords = (x2, y1, x2, y2)
-        self._edge_highlight_id = self.canvas.create_line(*coords, width=4, fill=color)
-        self.canvas.itemconfigure(self._edge_highlight_id, state="disabled")
-        self.canvas.tag_raise(self._edge_highlight_id)
-
-    def _clear_edge_highlight(self):
-        if self._edge_highlight_id:
-            self.canvas.delete(self._edge_highlight_id)
-        self._edge_highlight_id = None
-        self._hover_edge = None
-
-    def _start_edge_resize(self):
-        if self._edge_resize["node"] is not None or self._delete_mode:
-            return
-        if not self._hover_edge:
-            return
-        node, edge = self._hover_edge
-        if node.kind == "BLOCK":
-            orig = (node.x, node.y, node.width, node.height)
-        else:
-            orig = (node.x, node.y, node.width, node.height, node.image_subsample)
-        self._edge_resize["node"] = node
-        self._edge_resize["edge"] = edge
-        self._edge_resize["orig"] = orig
-        pointer_x = self.canvas.winfo_pointerx() - self.canvas.winfo_rootx()
-        pointer_y = self.canvas.winfo_pointery() - self.canvas.winfo_rooty()
-        event = SimpleNamespace(x=self.canvas.canvasx(pointer_x), y=self.canvas.canvasy(pointer_y))
-        self._resize_from_edge(event)
-
-    def _resize_from_edge(self, event):
-        node = self._edge_resize["node"]
-        edge = self._edge_resize["edge"]
-        orig = self._edge_resize["orig"]
-        if not node or not edge or not orig:
-            return
-        if node.kind != "BLOCK":
-            self._resize_gate(node, edge, orig, event)
-            return
-        orig_x, orig_y, orig_width, orig_height = orig
-        min_width = 80
-        min_height = 60
-        old_port_positions = []
-        for port in node.inputs + node.outputs:
-            if port.canvas_id:
-                old_port_positions.append((port, self._port_center(port.canvas_id)))
-        if edge == "left":
-            new_width = max(min_width, orig_width - (event.x - orig_x))
-            new_width = self._snap_value(new_width, min_width)
-            node.x = orig_x + (orig_width - new_width)
-            node.width = new_width
-        elif edge == "right":
-            node.width = self._snap_value(max(min_width, event.x - orig_x), min_width)
-        elif edge == "top":
-            new_height = max(min_height, orig_height - (event.y - orig_y))
-            new_height = self._snap_value(new_height, min_height)
-            node.y = orig_y + (orig_height - new_height)
-            node.height = new_height
-            for port, prev in old_port_positions:
-                if port.side in ("left", "right"):
-                    port.manual_y = prev[1]
-        elif edge == "bottom":
-            node.height = self._snap_value(max(min_height, event.y - orig_y), min_height)
-            for port, prev in old_port_positions:
-                if port.side in ("left", "right"):
-                    port.manual_y = prev[1]
-        self._redraw_node(node)
-        self._update_connections()
-        self._draw_edge_highlight(node, edge, "yellow")
-
-    def _finish_edge_resize(self):
-        if self._edge_resize["node"] is None:
-            return
-        self._record_history()
-        self._edge_resize["node"] = None
-        self._edge_resize["edge"] = None
-        self._edge_resize["orig"] = None
-        self._clear_edge_highlight()
 
     def _on_motion(self, event):
         if self._mode != "normal":
@@ -596,7 +469,7 @@ class DiagramApp:
             return "right"
         return None
 
-    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 12.0) -> str | None:
+    def _edge_for_point(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
         left = node.x
         right = node.x + node.width
         top = node.y
@@ -1036,9 +909,6 @@ class DiagramApp:
         return None
 
     def _on_wire_press(self, event):
-        if self._edge_resize["node"] is not None:
-            self._finish_edge_resize()
-            return
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -1369,9 +1239,6 @@ class DiagramApp:
         self._update_connections()
 
     def _on_port_press(self, event):
-        if self._edge_resize["node"] is not None:
-            self._finish_edge_resize()
-            return
         if self._mode == "delete_port":
             self._handle_delete_port_click(event)
             return
@@ -1731,7 +1598,6 @@ class DiagramApp:
             self._reset_port_mode()
         self._delete_mode = True
         self._delete_blink_on = False
-        self._clear_edge_highlight()
         self._capture_delete_colors()
         self._schedule_delete_blink()
 
