@@ -465,6 +465,9 @@ class DiagramApp:
         self.canvas.move(f"node:{node.name}", dx, dy)
         node.x += dx
         node.y += dy
+        for port in node.inputs + node.outputs:
+            if port.manual_y is not None:
+                port.manual_y += dy
         self._update_connections()
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
@@ -1017,6 +1020,27 @@ class DiagramApp:
                 return
             return
         if connection.waypoints:
+            coords = self._connection_line_coords(connection)
+            if not coords or len(coords) < 8:
+                return
+            points = [(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
+            for i in range(1, len(points) - 2):
+                ax, ay = points[i]
+                bx, by = points[i + 1]
+                if ay == by and self._near_horizontal_segment(event.x, event.y, ax, bx, ay):
+                    self._drag_wire["connection"] = connection
+                    self._drag_wire["mode"] = "wp_h"
+                    self._drag_wire["offset"] = event.y - ay
+                    self._drag_wire["seg_index"] = i
+                    self._drag_wire["points"] = points
+                    return
+                if ax == bx and self._near_vertical_segment(event.x, event.y, ax, ay, by):
+                    self._drag_wire["connection"] = connection
+                    self._drag_wire["mode"] = "wp_v"
+                    self._drag_wire["offset"] = event.x - ax
+                    self._drag_wire["seg_index"] = i
+                    self._drag_wire["points"] = points
+                    return
             return
         orientation = self._connection_orientation(connection)
         if orientation == "orthogonal":
@@ -1178,6 +1202,25 @@ class DiagramApp:
                 return
             self._move_port(node, port, event.x, event.y)
             return
+        if mode in ("wp_h", "wp_v"):
+            seg_idx = self._drag_wire.get("seg_index")
+            points = self._drag_wire.get("points")
+            if seg_idx is None or not points:
+                return
+            if mode == "wp_h":
+                new_y = self._snap_to_step(event.y - self._drag_wire["offset"], self.MID_STEP)
+                points[seg_idx] = (points[seg_idx][0], new_y)
+                points[seg_idx + 1] = (points[seg_idx + 1][0], new_y)
+            else:
+                new_x = self._snap_to_step(event.x - self._drag_wire["offset"], self.MID_STEP)
+                points[seg_idx] = (new_x, points[seg_idx][1])
+                points[seg_idx + 1] = (new_x, points[seg_idx + 1][1])
+            connection.waypoints = list(points[1:-1])
+            coords = [c for p in points for c in p]
+            self.canvas.coords(connection.line_id, *coords)
+            if connection.label_id:
+                self._update_label(connection, coords)
+            return
 
     def _on_wire_release(self, _event):
         if self._drag_wire["connection"]:
@@ -1186,6 +1229,8 @@ class DiagramApp:
         self._drag_wire["mode"] = None
         self._drag_wire["port"] = None
         self._drag_wire["node"] = None
+        self._drag_wire.pop("seg_index", None)
+        self._drag_wire.pop("points", None)
 
     def _near_vertical_segment(
         self,
