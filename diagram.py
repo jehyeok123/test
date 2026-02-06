@@ -259,20 +259,7 @@ class DiagramApp:
         self._record_history(initial=True)
         self._schedule_status_update()
 
-    _CUSTOM_GATE_KINDS = (
-        "AND2",
-        "AND4",
-        "OR2",
-        "OR4",
-        "XOR2",
-        "XOR4",
-        "MUX_2x1",
-        "MUX_4x1",
-        "DEMUX_1x2",
-        "DEMUX_1x4",
-        "DFF",
-        "INV",
-    )
+    _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF")
 
     def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0) -> "tk.PhotoImage | None":
         try:
@@ -332,35 +319,6 @@ class DiagramApp:
             tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
             draw.polygon(tri_points, fill="white", outline="black", width=max(1, scale))
 
-        elif kind.startswith("AND"):
-            radius = sh / 2
-            rect_w = sw - radius
-            draw.rectangle([0, 0, rect_w, sh], fill="white", outline="black", width=lw)
-            draw.pieslice([sw - 2 * radius, 0, sw, sh], -90, 90, fill="white", outline="black", width=lw)
-
-        elif kind.startswith("OR") or kind.startswith("XOR"):
-            radius = sh / 2
-            outer_center = (sw - radius, sh / 2)
-            inner_center = (sw - 1.65 * radius, sh / 2)
-            inner_radius = 1.2 * radius
-            outer_arc = _arc_points(outer_center[0], outer_center[1], radius, -90, 90, steps=80)
-            inner_arc = _arc_points(inner_center[0], inner_center[1], inner_radius, 90, 270, steps=80)
-            points = outer_arc + inner_arc
-            draw.polygon(points, fill="white", outline="black", width=lw)
-            if kind.startswith("XOR"):
-                offset = sh * 0.12
-                xor_center = (inner_center[0] - offset, inner_center[1])
-                xor_arc = _arc_points(xor_center[0], xor_center[1], inner_radius, 90, 270, steps=80)
-                draw.line(xor_arc, fill="black", width=max(1, scale))
-
-        elif kind == "INV":
-            bubble = max(4 * scale, int(sh * 0.08))
-            tri_points = [(0, 0), (0, sh), (sw - bubble * 2, sh / 2)]
-            draw.polygon(tri_points, fill="white", outline="black", width=lw)
-            cx = sw - bubble
-            cy = sh / 2
-            draw.ellipse([cx - bubble, cy - bubble, cx + bubble, cy + bubble], fill="white", outline="black", width=lw)
-
         if rotation:
             img = img.rotate(-rotation, expand=True)
         img = img.resize((w, h), Image.LANCZOS)
@@ -399,44 +357,6 @@ class DiagramApp:
                     fill="white", outline="black", width=lw,
                 )
                 node.items.append(rect)
-            elif kind.startswith("AND"):
-                rect = self.canvas.create_rectangle(
-                    x1, y1, x1 + w * 0.6, y2,
-                    fill="white", outline="black", width=lw,
-                )
-                arc = self.canvas.create_arc(
-                    x1 + w * 0.2, y1, x2, y2,
-                    start=-90, extent=180,
-                    style=tk.ARC, outline="black", width=lw,
-                )
-                node.items.extend([rect, arc])
-            elif kind.startswith("OR") or kind.startswith("XOR"):
-                arc1 = self.canvas.create_arc(
-                    x1 - w * 0.4, y1, x1 + w * 0.9, y2,
-                    start=-60, extent=120, style=tk.ARC, outline="black", width=lw,
-                )
-                arc2 = self.canvas.create_arc(
-                    x1 - w * 0.6, y1, x1 + w * 0.5, y2,
-                    start=-60, extent=120, style=tk.ARC, outline="black", width=lw,
-                )
-                node.items.extend([arc1, arc2])
-                if kind.startswith("XOR"):
-                    arc3 = self.canvas.create_arc(
-                        x1 - w * 0.7, y1, x1 + w * 0.4, y2,
-                        start=-60, extent=120, style=tk.ARC, outline="black", width=lw,
-                    )
-                    node.items.append(arc3)
-            elif kind == "INV":
-                poly = self.canvas.create_polygon(
-                    x1, y1, x1, y2, x2 - w * 0.15, y1 + h / 2,
-                    fill="white", outline="black", width=lw,
-                )
-                bubble = self.canvas.create_oval(
-                    x2 - w * 0.15, y1 + h / 2 - h * 0.08,
-                    x2, y1 + h / 2 + h * 0.08,
-                    outline="black", width=lw, fill="white",
-                )
-                node.items.extend([poly, bubble])
             else:
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
