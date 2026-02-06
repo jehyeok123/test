@@ -54,6 +54,10 @@ class Connection:
     manual_mid_y: float | None = None
     label: str | None = None
     label_id: int | None = None
+    label_font_family: str = "Arial"
+    label_font_size: int = 12
+    label_x: float | None = None
+    label_y: float | None = None
     waypoints: list[tuple[float, float]] = field(default_factory=list)
 
 
@@ -121,7 +125,7 @@ class DiagramApp:
         self.connect_button.pack(side=tk.LEFT, padx=2)
         self.disconnect_button = ttk.Button(self.toolbar_row1, text="DISCONNECT", command=self._toggle_disconnect_mode, style="Tool.TButton")
         self.disconnect_button.pack(side=tk.LEFT, padx=2)
-        self.wire_name_button = ttk.Button(self.toolbar_row1, text="WIRE NAME (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
+        self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
         self.wire_name_button.pack(side=tk.LEFT, padx=2)
 
         self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (A)", command=self._toggle_create_port_mode, style="Tool.TButton")
@@ -179,6 +183,10 @@ class DiagramApp:
         self._node_color_backup: dict[str, tuple[str, str]] = {}
         self._wire_preview_id: int | None = None
         self._pan_data: dict[str, object] = {"active": False, "x": 0, "y": 0}
+        self._selected_wire: Connection | None = None
+        self._selected_label_conn: Connection | None = None
+        self._selected_label_border: int | None = None
+        self._label_drag_data: dict[str, object] = {"connection": None, "x": 0, "y": 0}
         self._build_ui()
 
     def _build_ui(self):
@@ -191,15 +199,19 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
         self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
+        self.canvas.tag_bind("wire", "<Double-Button-1>", self._on_wire_double_click)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
+        self.canvas.tag_bind("label", "<ButtonPress-1>", self._on_label_press)
+        self.canvas.tag_bind("label", "<B1-Motion>", self._on_label_motion)
+        self.canvas.tag_bind("label", "<ButtonRelease-1>", self._on_label_release)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Control-MouseWheel>", self._on_zoom_wheel)
         self.canvas.bind("<Control-Button-4>", self._on_zoom_wheel)
         self.canvas.bind("<Control-Button-5>", self._on_zoom_wheel)
         self.root.bind("i", lambda _event: self._open_new_block())
-        self.root.bind("e", lambda _event: self._open_edit_block())
+        self.root.bind("e", lambda _event: self._handle_edit_key())
         self.root.bind("<Delete>", lambda _event: self._toggle_delete_mode())
         self.root.bind("<Control-a>", lambda _event: self._toggle_delete_port_mode())
         self.root.bind("`", lambda _event: self._toggle_ports())
@@ -316,14 +328,19 @@ class DiagramApp:
         self.canvas.addtag_withtag("wire", line)
         connection.line_id = line
         if connection.label:
-            label_x, label_y = self._label_position(coords)
+            if connection.label_x is not None and connection.label_y is not None:
+                label_x, label_y = connection.label_x, connection.label_y
+            else:
+                label_x, label_y = self._label_position(coords)
+            font = (connection.label_font_family, connection.label_font_size)
             label_id = self.canvas.create_text(
                 label_x,
                 label_y,
                 text=connection.label,
-                font=("Arial", 12),
+                font=font,
                 anchor="s",
             )
+            self.canvas.addtag_withtag("label", label_id)
             connection.label_id = label_id
 
     def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str | None = None) -> int | None:
@@ -340,6 +357,8 @@ class DiagramApp:
         return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _on_press(self, event):
+        self._deselect_wire()
+        self._deselect_label()
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -404,6 +423,8 @@ class DiagramApp:
 
     def _on_canvas_press(self, event):
         if self._mode != "connect":
+            self._deselect_wire()
+            self._deselect_label()
             return
         if len(self._selected_ports) != 1:
             return
@@ -913,6 +934,8 @@ class DiagramApp:
     def _update_label(self, connection: Connection, coords: list[float]):
         if not connection.label_id:
             return
+        if connection.label_x is not None and connection.label_y is not None:
+            return
         label_x, label_y = self._label_position(coords)
         self.canvas.coords(connection.label_id, label_x, label_y)
 
@@ -944,27 +967,7 @@ class DiagramApp:
             connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
             if not connection:
                 return
-            label = simpledialog.askstring("WIRE NAME", "Wire name:")
-            if label is not None:
-                connection.label = label
-                if connection.label_id is None:
-                    coords = self._connection_line_coords(connection)
-                    if coords:
-                        label_x, label_y = self._label_position(coords)
-                        connection.label_id = self.canvas.create_text(
-                            label_x,
-                            label_y,
-                            text=label,
-                            font=("Arial", 12),
-                            anchor="s",
-                        )
-                else:
-                    self.canvas.itemconfig(connection.label_id, text=label)
-                if connection.label_id:
-                    coords = self._connection_line_coords(connection)
-                    if coords:
-                        self._update_label(connection, coords)
-                self._record_history()
+            self._open_label_dialog(connection, is_new=True)
             self._toggle_wire_name_mode()
             return
         if self._mode == "disconnect":
@@ -981,12 +984,15 @@ class DiagramApp:
             return
         if self._mode != "normal":
             return
+        self._deselect_label()
         item = self.canvas.find_withtag("current")
         if not item:
             return
         line_id = item[0]
         connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
         if not connection:
+            return
+        if self._selected_wire is not connection:
             return
         coords = self._connection_line_coords(connection)
         if not coords:
@@ -1024,10 +1030,27 @@ class DiagramApp:
             if not coords or len(coords) < 8:
                 return
             points = [(coords[i], coords[i + 1]) for i in range(0, len(coords), 2)]
-            for i in range(1, len(points) - 2):
+            n = len(points)
+            for i in range(n - 1):
                 ax, ay = points[i]
                 bx, by = points[i + 1]
+                is_first = (i == 0)
+                is_last = (i == n - 2)
                 if ay == by and self._near_horizontal_segment(event.x, event.y, ax, bx, ay):
+                    if is_first and connection.src:
+                        port_info = self._find_port(connection.src[0], connection.src[1])
+                        if port_info:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "src_port"
+                            self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            return
+                    if is_last and connection.dst:
+                        port_info = self._find_port(connection.dst[0], connection.dst[1])
+                        if port_info:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "dst_port"
+                            self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            return
                     self._drag_wire["connection"] = connection
                     self._drag_wire["mode"] = "wp_h"
                     self._drag_wire["offset"] = event.y - ay
@@ -1035,6 +1058,20 @@ class DiagramApp:
                     self._drag_wire["points"] = points
                     return
                 if ax == bx and self._near_vertical_segment(event.x, event.y, ax, ay, by):
+                    if is_first and connection.src:
+                        port_info = self._find_port(connection.src[0], connection.src[1])
+                        if port_info:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "src_port"
+                            self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            return
+                    if is_last and connection.dst:
+                        port_info = self._find_port(connection.dst[0], connection.dst[1])
+                        if port_info:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "dst_port"
+                            self._drag_wire["node"], self._drag_wire["port"] = port_info
+                            return
                     self._drag_wire["connection"] = connection
                     self._drag_wire["mode"] = "wp_v"
                     self._drag_wire["offset"] = event.x - ax
@@ -1231,6 +1268,167 @@ class DiagramApp:
         self._drag_wire["node"] = None
         self._drag_wire.pop("seg_index", None)
         self._drag_wire.pop("points", None)
+
+    def _on_wire_double_click(self, event):
+        if self._mode != "normal":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        line_id = item[0]
+        connection = next((c for c in self.connections if c.line_id == line_id), None)
+        if not connection:
+            return
+        if self._selected_wire is connection:
+            self._deselect_wire()
+            return
+        self._deselect_wire()
+        self._selected_wire = connection
+        self.canvas.itemconfigure(line_id, width=4)
+
+    def _deselect_wire(self):
+        if self._selected_wire and self._selected_wire.line_id:
+            self.canvas.itemconfigure(self._selected_wire.line_id, width=2)
+        self._selected_wire = None
+
+    def _deselect_label(self):
+        if self._selected_label_border:
+            self.canvas.delete(self._selected_label_border)
+            self._selected_label_border = None
+        self._selected_label_conn = None
+
+    def _on_label_press(self, event):
+        if self._mode != "normal":
+            return
+        item = self.canvas.find_withtag("current")
+        if not item:
+            return
+        label_id = item[0]
+        connection = next((c for c in self.connections if c.label_id == label_id), None)
+        if not connection:
+            return
+        self._deselect_wire()
+        self._deselect_label()
+        self._selected_label_conn = connection
+        bbox = self.canvas.bbox(label_id)
+        if bbox:
+            pad = 3
+            self._selected_label_border = self.canvas.create_rectangle(
+                bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                outline="black", width=2,
+            )
+        self._label_drag_data["connection"] = connection
+        self._label_drag_data["x"] = event.x
+        self._label_drag_data["y"] = event.y
+
+    def _on_label_motion(self, event):
+        connection = self._label_drag_data.get("connection")
+        if not connection or not connection.label_id:
+            return
+        dx = event.x - self._label_drag_data["x"]
+        dy = event.y - self._label_drag_data["y"]
+        self._label_drag_data["x"] = event.x
+        self._label_drag_data["y"] = event.y
+        self.canvas.move(connection.label_id, dx, dy)
+        if self._selected_label_border:
+            self.canvas.move(self._selected_label_border, dx, dy)
+        lx, ly = self.canvas.coords(connection.label_id)
+        connection.label_x = lx
+        connection.label_y = ly
+
+    def _on_label_release(self, _event):
+        if self._label_drag_data.get("connection"):
+            self._record_history()
+        self._label_drag_data["connection"] = None
+
+    def _handle_edit_key(self):
+        if self._selected_label_conn:
+            self._open_label_dialog(self._selected_label_conn)
+            return
+        self._open_edit_block()
+
+    def _open_label_dialog(self, connection: Connection, is_new: bool = False):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("LABEL")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Text:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        text_var = tk.StringVar(value=connection.label or "")
+        text_entry = tk.Entry(dialog, textvariable=text_var, width=30)
+        text_entry.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
+        text_entry.focus_set()
+
+        tk.Label(dialog, text="Font:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        font_families = ["Arial", "Helvetica", "Times New Roman", "Courier New", "Verdana", "Georgia"]
+        font_var = tk.StringVar(value=connection.label_font_family)
+        font_combo = ttk.Combobox(dialog, textvariable=font_var, values=font_families, width=18)
+        font_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5)
+
+        tk.Label(dialog, text="Size:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        size_var = tk.IntVar(value=connection.label_font_size)
+        size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
+        size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+
+        result = {"ok": False}
+
+        def on_ok(_event=None):
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel(_event=None):
+            dialog.destroy()
+
+        text_entry.bind("<Return>", on_ok)
+        dialog.bind("<Escape>", on_cancel)
+        btn_frame = tk.Frame(dialog)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        tk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        dialog.wait_window()
+        if not result["ok"]:
+            return
+        new_text = text_var.get()
+        if not new_text and is_new:
+            return
+        connection.label = new_text if new_text else None
+        connection.label_font_family = font_var.get() or "Arial"
+        try:
+            connection.label_font_size = int(size_var.get())
+        except (ValueError, tk.TclError):
+            connection.label_font_size = 12
+        font = (connection.label_font_family, connection.label_font_size)
+        if connection.label:
+            if connection.label_id:
+                self.canvas.itemconfig(connection.label_id, text=connection.label, font=font)
+            else:
+                coords = self._connection_line_coords(connection)
+                if coords:
+                    if connection.label_x is not None and connection.label_y is not None:
+                        lx, ly = connection.label_x, connection.label_y
+                    else:
+                        lx, ly = self._label_position(coords)
+                    connection.label_id = self.canvas.create_text(
+                        lx, ly, text=connection.label, font=font, anchor="s",
+                    )
+                    self.canvas.addtag_withtag("label", connection.label_id)
+        else:
+            if connection.label_id:
+                self.canvas.delete(connection.label_id)
+                connection.label_id = None
+                connection.label_x = None
+                connection.label_y = None
+        self._deselect_label()
+        if self._selected_label_conn is connection and connection.label_id:
+            bbox = self.canvas.bbox(connection.label_id)
+            if bbox:
+                pad = 3
+                self._selected_label_border = self.canvas.create_rectangle(
+                    bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad,
+                    outline="black", width=2,
+                )
+        self._record_history()
 
     def _near_vertical_segment(
         self,
@@ -1808,6 +2006,10 @@ class DiagramApp:
         self._record_history()
 
     def _remove_connection(self, connection: Connection, record: bool = True):
+        if self._selected_wire is connection:
+            self._selected_wire = None
+        if self._selected_label_conn is connection:
+            self._deselect_label()
         if connection.line_id:
             self.canvas.delete(connection.line_id)
             self._wire_color_backup.pop(connection.line_id, None)
@@ -2004,6 +2206,10 @@ class DiagramApp:
                 connection.manual_mid_y *= factor
             if connection.waypoints:
                 connection.waypoints = [(wx * factor, wy * factor) for wx, wy in connection.waypoints]
+            if connection.label_x is not None:
+                connection.label_x *= factor
+            if connection.label_y is not None:
+                connection.label_y *= factor
         for node in self.nodes.values():
             self._redraw_node(node)
         self._update_connections()
@@ -2113,6 +2319,14 @@ class DiagramApp:
             }
             if connection.waypoints:
                 wire_data["waypoints"] = [(_unscale(wx), _unscale(wy)) for wx, wy in connection.waypoints]
+            if connection.label_font_family != "Arial":
+                wire_data["label_font_family"] = connection.label_font_family
+            if connection.label_font_size != 12:
+                wire_data["label_font_size"] = connection.label_font_size
+            if connection.label_x is not None:
+                wire_data["label_x"] = _unscale(connection.label_x)
+            if connection.label_y is not None:
+                wire_data["label_y"] = _unscale(connection.label_y)
             wires.append(wire_data)
         return {"blocks": blocks, "connections": connections, "wires": wires}
 
@@ -2153,6 +2367,9 @@ class DiagramApp:
         self._active_node_name = None
         self._outline_backup.clear()
         self._clear_wire_preview()
+        self._selected_wire = None
+        self._selected_label_conn = None
+        self._selected_label_border = None
         self._mode = "normal"
         for node in self.nodes.values():
             self._draw_node(node)
@@ -2188,7 +2405,7 @@ class DiagramApp:
             "- SAVE (Ctrl+S): save to input.json.\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
             "- DISCONNECT: click a wire to remove it.\n"
-            "- WIRE NAME (L): click a wire to name it.\n"
+            "- LABEL (L): click a wire to add/edit a label.\n"
             "- CREATE PORT (A): add a port on the selected block edge.\n"
             "- DELETE PORT (Ctrl+A): remove a port on the selected block.\n"
             "- SHOW/HIDE PORT (`): toggle port visibility.\n"
@@ -2431,6 +2648,14 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                     waypoints = wire.get("waypoints")
                     if waypoints:
                         connection.waypoints = [(float(wp[0]), float(wp[1])) for wp in waypoints]
+                    if "label_font_family" in wire:
+                        connection.label_font_family = str(wire["label_font_family"])
+                    if "label_font_size" in wire:
+                        connection.label_font_size = int(wire["label_font_size"])
+                    if "label_x" in wire and wire["label_x"] is not None:
+                        connection.label_x = float(wire["label_x"])
+                    if "label_y" in wire and wire["label_y"] is not None:
+                        connection.label_y = float(wire["label_y"])
                     break
 
     return nodes, connections
