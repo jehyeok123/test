@@ -169,6 +169,7 @@ class DiagramApp:
         self._history: list[dict[str, object]] = []
         self._redo_stack: list[dict[str, object]] = []
         self._pending_midpoints: list[tuple[float, float]] = []
+        self._wire_direction: str | None = None
         self._suspend_history = False
         self._delete_mode = False
         self._delete_blink_on = False
@@ -188,7 +189,6 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
-        self.canvas.tag_bind("node", "<Double-Button-1>", self._on_toggle_resize)
         self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
@@ -206,6 +206,7 @@ class DiagramApp:
         self.root.bind("<Control-s>", lambda _event: self._save_json())
         self.root.bind("<Control-z>", lambda _event: self._undo())
         self.root.bind("<Control-y>", lambda _event: self._redo())
+        self.root.bind("s", lambda _event: self._toggle_resize_active_node())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("a", lambda _event: self._toggle_create_port_mode())
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
@@ -409,9 +410,23 @@ class DiagramApp:
         item = self.canvas.find_withtag("current")
         if item:
             return
+        node_name, port_name = self._selected_ports[0]
+        port_id = self._get_port_canvas_id(node_name, port_name)
+        if not port_id:
+            return
+        start_x, start_y = self._port_center(port_id)
+        if self._pending_midpoints:
+            last_x, last_y = self._pending_midpoints[-1]
+        else:
+            last_x, last_y = start_x, start_y
         snapped_x = self._snap_value(event.x)
         snapped_y = self._snap_value(event.y)
-        self._pending_midpoints.append((snapped_x, snapped_y))
+        cur_dir = self._current_wire_direction()
+        if cur_dir == "horizontal":
+            bend = (snapped_x, last_y)
+        else:
+            bend = (last_x, snapped_y)
+        self._pending_midpoints.append(bend)
         self._update_wire_preview(event.x, event.y)
 
     def _on_canvas_motion(self, event):
@@ -493,21 +508,20 @@ class DiagramApp:
             return 0.5
         return max(0.0, min(1.0, (x - node.x) / node.width))
 
-    def _on_toggle_resize(self, event):
+    def _toggle_resize_active_node(self):
         if self._mode != "normal":
             return
-        item = self.canvas.find_withtag("current")
-        if not item:
+        if not self._active_node_name:
             return
-        tags = self.canvas.gettags(item[0])
-        node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
-        if not node_tag:
+        node = self.nodes.get(self._active_node_name)
+        if not node:
             return
-        node_name = node_tag.split(":", 1)[1]
-        node = self.nodes[node_name]
-        self._active_node_name = node.name
+        saved = [(p, p.manual_y, p.offset) for p in node.inputs + node.outputs]
         node.resize_enabled = not node.resize_enabled
         self._redraw_node(node)
+        for p, my, off in saved:
+            p.manual_y = my
+            p.offset = off
         self._update_connections()
 
     def _on_resize_motion(self, event):
@@ -1259,6 +1273,7 @@ class DiagramApp:
             self._selected_ports.append((node_name, port_name))
             self._set_port_color(port, "blue")
             self._pending_midpoints = []
+            self._wire_direction = "horizontal" if port.side in ("left", "right") else "vertical"
             self._update_wire_preview(event.x, event.y)
             return
         if len(self._selected_ports) == 1:
@@ -1273,8 +1288,22 @@ class DiagramApp:
             src = (first_node, first_port)
             dst = (node_name, port_name)
             connection = Connection(src=src, dst=dst)
-            if self._pending_midpoints:
-                connection.waypoints = list(self._pending_midpoints)
+            waypoints = list(self._pending_midpoints)
+            dst_port_id = self._get_port_canvas_id(node_name, port_name)
+            if dst_port_id:
+                dest_x, dest_y = self._port_center(dst_port_id)
+                src_port_id = self._get_port_canvas_id(first_node, first_port)
+                if src_port_id:
+                    if waypoints:
+                        last_x, last_y = waypoints[-1]
+                    else:
+                        last_x, last_y = self._port_center(src_port_id)
+                    cur_dir = self._current_wire_direction()
+                    if cur_dir == "vertical":
+                        if last_x != dest_x:
+                            waypoints.append((last_x, dest_y))
+            if waypoints:
+                connection.waypoints = waypoints
             self.connections.append(connection)
             self._draw_connection(connection)
             self._record_history()
@@ -1531,11 +1560,13 @@ class DiagramApp:
         self._mode = "connect"
         self._selected_ports = []
         self._pending_midpoints = []
+        self._wire_direction = None
         self._set_all_port_colors("yellow")
 
     def _reset_connect_mode(self):
         self._selected_ports = []
         self._pending_midpoints = []
+        self._wire_direction = None
         self._clear_wire_preview()
         self._set_all_port_colors("black")
         self._mode = "normal"
@@ -1552,6 +1583,12 @@ class DiagramApp:
         self._mode = "disconnect"
         self._set_all_wire_colors("red")
 
+    def _current_wire_direction(self) -> str:
+        direction = self._wire_direction or "horizontal"
+        if len(self._pending_midpoints) % 2 == 1:
+            direction = "vertical" if direction == "horizontal" else "horizontal"
+        return direction
+
     def _update_wire_preview(self, x: float, y: float):
         if len(self._selected_ports) != 1:
             self._clear_wire_preview()
@@ -1565,16 +1602,13 @@ class DiagramApp:
         end_x, end_y = self._snap_value(x), self._snap_value(y)
         points = [(start_x, start_y)]
         for mx, my in self._pending_midpoints:
-            last_x, last_y = points[-1]
-            if last_x != mx:
-                points.append((mx, last_y))
-            if last_y != my:
-                points.append((mx, my))
+            points.append((mx, my))
         last_x, last_y = points[-1]
-        if last_x != end_x:
+        cur_dir = self._current_wire_direction()
+        if cur_dir == "horizontal":
             points.append((end_x, last_y))
-        if last_y != end_y:
-            points.append((end_x, end_y))
+        else:
+            points.append((last_x, end_y))
         coords = [c for p in points for c in p]
         if len(coords) < 4:
             coords = [start_x, start_y, end_x, end_y]
