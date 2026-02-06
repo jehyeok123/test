@@ -883,9 +883,7 @@ class DiagramApp:
             return "horizontal"
         if src_side in ("top", "bottom") and dst_side in ("top", "bottom"):
             return "vertical"
-        if dst_side in ("left", "right"):
-            return "horizontal"
-        return "vertical"
+        return "orthogonal"
 
     def _connection_manual_locked(self, connection: Connection) -> bool:
         if connection.manual_mid_x is not None or connection.manual_mid_y is not None:
@@ -926,6 +924,10 @@ class DiagramApp:
                 return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
             if orientation == "vertical":
                 return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
+            if orientation == "orthogonal":
+                dst_side = self._port_side((dst_node, dst_port))
+                prefer_vertical_end = dst_side in ("top", "bottom")
+                return self._connection_coords_orthogonal((x1, y1), (x2, y2), prefer_vertical_end)
             return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
         if connection.dst:
             dst_node, dst_port = connection.dst
@@ -1104,6 +1106,55 @@ class DiagramApp:
                     self._drag_wire["seg_index"] = i
                     self._drag_wire["points"] = points
                     return
+            return
+        if len(coords) == 6 and not connection.waypoints:
+            p0 = (coords[0], coords[1])
+            p1 = (coords[2], coords[3])
+            p2 = (coords[4], coords[5])
+            if p0[1] == p1[1] and self._near_horizontal_segment(event.x, event.y, p0[0], p1[0], p0[1]):
+                if connection.src:
+                    port_info = self._find_port(connection.src[0], connection.src[1])
+                    if port_info:
+                        node, port = port_info
+                        if not node.resize_enabled:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "src_port"
+                            self._drag_wire["node"] = node
+                            self._drag_wire["port"] = port
+                            return
+            if p0[0] == p1[0] and self._near_vertical_segment(event.x, event.y, p0[0], p0[1], p1[1]):
+                if connection.src:
+                    port_info = self._find_port(connection.src[0], connection.src[1])
+                    if port_info:
+                        node, port = port_info
+                        if not node.resize_enabled:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "src_port"
+                            self._drag_wire["node"] = node
+                            self._drag_wire["port"] = port
+                            return
+            if p1[1] == p2[1] and self._near_horizontal_segment(event.x, event.y, p1[0], p2[0], p1[1]):
+                if connection.dst:
+                    port_info = self._find_port(connection.dst[0], connection.dst[1])
+                    if port_info:
+                        node, port = port_info
+                        if not node.resize_enabled:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "dst_port"
+                            self._drag_wire["node"] = node
+                            self._drag_wire["port"] = port
+                            return
+            if p1[0] == p2[0] and self._near_vertical_segment(event.x, event.y, p1[0], p1[1], p2[1]):
+                if connection.dst:
+                    port_info = self._find_port(connection.dst[0], connection.dst[1])
+                    if port_info:
+                        node, port = port_info
+                        if not node.resize_enabled:
+                            self._drag_wire["connection"] = connection
+                            self._drag_wire["mode"] = "dst_port"
+                            self._drag_wire["node"] = node
+                            self._drag_wire["port"] = port
+                            return
             return
         orientation = self._connection_orientation(connection)
         if orientation == "vertical":
