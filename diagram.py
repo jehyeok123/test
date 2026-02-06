@@ -259,7 +259,8 @@ class DiagramApp:
         self._record_history(initial=True)
         self._schedule_status_update()
 
-    _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF")
+    _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF",
+                          "AND2", "AND4", "OR2", "OR4", "XOR2", "XOR4", "INV")
 
     def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0) -> "tk.PhotoImage | None":
         try:
@@ -318,6 +319,102 @@ class DiagramApp:
             tri_s = 8 * scale
             tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
             draw.polygon(tri_points, fill="white", outline="black", width=max(1, scale))
+
+        elif kind.startswith("AND"):
+            import math
+            # AND gate: flat left side + semicircle on right (D-shape)
+            radius = sh / 2
+            mid_x = sw - radius  # semicircle center, so arc reaches right edge
+            body_pts = []
+            body_pts.append((0, 0))
+            body_pts.append((mid_x, 0))
+            n_curve = 60
+            for i in range(n_curve + 1):
+                angle = -math.pi / 2 + math.pi * i / n_curve
+                cx = mid_x + radius * math.cos(angle)
+                cy = sh / 2 + radius * math.sin(angle)
+                body_pts.append((cx, cy))
+            body_pts.append((mid_x, sh))
+            body_pts.append((0, sh))
+            draw.polygon(body_pts, fill="white", outline="black", width=lw)
+
+        elif kind.startswith("OR"):
+            import math
+            # OR gate: curved input side + curved body + pointed output
+            n_curve = 60
+            body_pts = []
+            # Input curve (left side, concave rightward)
+            curve_depth = sw * 0.2
+            for i in range(n_curve + 1):
+                t = i / n_curve
+                y = t * sh
+                x = curve_depth * math.sin(t * math.pi)
+                body_pts.append((x, y))
+            # Bottom curve to output point
+            for i in range(n_curve + 1):
+                t = i / n_curve
+                x = body_pts[-1][0] + (sw - body_pts[-1][0]) * t
+                # Quadratic bezier: from bottom-left through control to tip
+                y = (1 - t) ** 2 * sh + 2 * (1 - t) * t * (sh * 0.75) + t ** 2 * (sh * 0.5)
+                body_pts.append((x, y))
+            # Top curve from output point back to start
+            for i in range(n_curve, -1, -1):
+                t = i / n_curve
+                x = body_pts[0][0] + (sw - body_pts[0][0]) * t
+                y = (1 - t) ** 2 * 0 + 2 * (1 - t) * t * (sh * 0.25) + t ** 2 * (sh * 0.5)
+                body_pts.append((x, y))
+            draw.polygon(body_pts, fill="white", outline="black", width=lw)
+
+        elif kind.startswith("XOR"):
+            import math
+            # XOR gate: same as OR but with extra curved line on input side
+            n_curve = 60
+            curve_depth = sw * 0.2
+            xor_gap = sw * 0.08
+            body_pts = []
+            # Input curve (left side, concave rightward) - shifted right by xor_gap
+            for i in range(n_curve + 1):
+                t = i / n_curve
+                y = t * sh
+                x = xor_gap + curve_depth * math.sin(t * math.pi)
+                body_pts.append((x, y))
+            # Bottom curve to output point
+            for i in range(n_curve + 1):
+                t = i / n_curve
+                x = body_pts[-1][0] + (sw - body_pts[-1][0]) * t
+                y = (1 - t) ** 2 * sh + 2 * (1 - t) * t * (sh * 0.75) + t ** 2 * (sh * 0.5)
+                body_pts.append((x, y))
+            # Top curve from output point back to start
+            for i in range(n_curve, -1, -1):
+                t = i / n_curve
+                x = body_pts[0][0] + (sw - body_pts[0][0]) * t
+                y = (1 - t) ** 2 * 0 + 2 * (1 - t) * t * (sh * 0.25) + t ** 2 * (sh * 0.5)
+                body_pts.append((x, y))
+            draw.polygon(body_pts, fill="white", outline="black", width=lw)
+            # Extra input curve (the distinguishing XOR line)
+            extra_pts = []
+            for i in range(n_curve + 1):
+                t = i / n_curve
+                y = t * sh
+                x = curve_depth * math.sin(t * math.pi)
+                extra_pts.append((x, y))
+            for i in range(len(extra_pts) - 1):
+                draw.line([extra_pts[i], extra_pts[i + 1]], fill="black", width=lw)
+
+        elif kind == "INV":
+            import math
+            # INV gate: triangle pointing right + bubble at output
+            bubble_r = int(sw * 0.07)
+            tri_right = sw - bubble_r * 2 - lw
+            tri_pts = [(0, 0), (tri_right, sh // 2), (0, sh)]
+            draw.polygon(tri_pts, fill="white", outline="black", width=lw)
+            # Bubble (circle) at output
+            bx = tri_right + bubble_r
+            by = sh // 2
+            draw.ellipse(
+                [bx - bubble_r, by - bubble_r, bx + bubble_r, by + bubble_r],
+                fill="white", outline="black", width=lw
+            )
 
         if rotation:
             img = img.rotate(-rotation, expand=True)
