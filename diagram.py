@@ -113,6 +113,21 @@ class DiagramApp:
         self.toolbar_row2.pack(fill=tk.X, pady=(0, 2))
         ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X, pady=(2, 0))
 
+        self._status_frame = tk.Frame(self.root, bg="#f5f5f5", height=22)
+        self._status_frame.pack(fill=tk.X)
+        self._status_frame.pack_propagate(False)
+        self._status_mode_label = tk.Label(
+            self._status_frame, text="Mode: normal", font=("Arial", 9),
+            bg="#f5f5f5", fg="#555555", anchor="w",
+        )
+        self._status_mode_label.pack(side=tk.LEFT, padx=6)
+        self._status_selection_label = tk.Label(
+            self._status_frame, text="", font=("Arial", 9),
+            bg="#f5f5f5", fg="#555555", anchor="w",
+        )
+        self._status_selection_label.pack(side=tk.LEFT, padx=6)
+        ttk.Separator(self.root, orient="horizontal").pack(fill=tk.X)
+
         self.new_button = ttk.Button(self.toolbar_row1, text="NEW (I)", command=self._open_new_block, style="Tool.TButton")
         self.new_button.pack(side=tk.LEFT, padx=2)
         self.edit_button = ttk.Button(self.toolbar_row1, text="EDIT (E)", command=self._open_edit_block, style="Tool.TButton")
@@ -226,8 +241,10 @@ class DiagramApp:
         self.root.bind("l", lambda _event: self._toggle_wire_name_mode())
         self.root.bind("f", lambda _event: self._bring_active_front())
         self.root.bind("b", lambda _event: self._send_active_back())
+        self.root.bind("<Escape>", lambda _event: self._handle_escape())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
         self._record_history(initial=True)
+        self._schedule_status_update()
 
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
@@ -1092,30 +1109,18 @@ class DiagramApp:
         if orientation == "orthogonal":
             if not connection.src or not connection.dst:
                 return
-            src_node, src_port = connection.src
-            dst_node, dst_port = connection.dst
-            src_side = self._port_side((src_node, src_port))
-            dst_side = self._port_side((dst_node, dst_port))
-            if not src_side or not dst_side:
-                return
-            if src_side in ("left", "right"):
-                lr_target = self._find_port(src_node, src_port)
-                tb_target = self._find_port(dst_node, dst_port)
-            else:
-                lr_target = self._find_port(dst_node, dst_port)
-                tb_target = self._find_port(src_node, src_port)
-            if not lr_target or not tb_target:
-                return
             h_x1, h_x2, h_y, v_x, v_y1, v_y2 = self._orthogonal_segments(coords)
             if self._near_horizontal_segment(event.x, event.y, h_x1, h_x2, h_y):
+                connection.manual_mid_y = h_y
                 self._drag_wire["connection"] = connection
-                self._drag_wire["mode"] = "orth_move_lr"
-                self._drag_wire["node"], self._drag_wire["port"] = lr_target
+                self._drag_wire["offset"] = event.y - h_y
+                self._drag_wire["mode"] = "mid_y"
                 return
             if self._near_vertical_segment(event.x, event.y, v_x, v_y1, v_y2):
+                connection.manual_mid_x = v_x
                 self._drag_wire["connection"] = connection
-                self._drag_wire["mode"] = "orth_move_tb"
-                self._drag_wire["node"], self._drag_wire["port"] = tb_target
+                self._drag_wire["offset"] = event.x - v_x
+                self._drag_wire["mode"] = "mid"
                 return
             return
         if orientation == "vertical":
@@ -1317,6 +1322,35 @@ class DiagramApp:
             self._selected_label_border = None
         self._selected_label_conn = None
 
+    def _schedule_status_update(self):
+        self._update_status_bar()
+        self.root.after(150, self._schedule_status_update)
+
+    def _update_status_bar(self):
+        mode_map = {
+            "normal": "normal",
+            "connect": "connect",
+            "disconnect": "disconnect",
+            "create_port": "create port",
+            "delete_port": "delete port",
+            "wire_name": "label",
+        }
+        mode_text = mode_map.get(self._mode, self._mode)
+        if self._delete_mode:
+            mode_text = "delete"
+        self._status_mode_label.config(text=f"Mode: {mode_text}")
+        sel_text = ""
+        if self._selected_wire:
+            sel_text = "| Selected: wire"
+        elif self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                if node.kind == "BLOCK":
+                    sel_text = f"| Selected: {node.name}"
+                else:
+                    sel_text = f"| Selected: {node.kind}"
+        self._status_selection_label.config(text=sel_text)
+
     def _on_label_press(self, event):
         if self._mode != "normal":
             return
@@ -1360,6 +1394,15 @@ class DiagramApp:
         if self._label_drag_data.get("connection"):
             self._record_history()
         self._label_drag_data["connection"] = None
+
+    def _handle_escape(self):
+        if self._delete_mode:
+            self._toggle_delete_mode()
+            return
+        if self._mode in ("connect", "disconnect", "create_port", "delete_port", "wire_name"):
+            self._reset_port_mode()
+        self._deselect_wire()
+        self._deselect_label()
 
     def _handle_edit_key(self):
         if self._selected_label_conn:
