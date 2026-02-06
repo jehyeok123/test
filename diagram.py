@@ -40,6 +40,7 @@ class Node:
     label_font_family: str = "Arial"
     label_font_weight: str = "bold"
     level: int = 0
+    rotation: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
     image_subsample: int = 10
@@ -56,6 +57,8 @@ class Connection:
     label_id: int | None = None
     label_font_family: str = "Arial"
     label_font_size: int = 12
+    label_font_weight: str = "normal"
+    label_angle: int = 0
     label_x: float | None = None
     label_y: float | None = None
     waypoints: list[tuple[float, float]] = field(default_factory=list)
@@ -133,6 +136,10 @@ class DiagramApp:
         self.new_button.pack(side=tk.LEFT, padx=2)
         self.edit_button = ttk.Button(self.toolbar_row1, text="EDIT (E)", command=self._open_edit_block, style="Tool.TButton")
         self.edit_button.pack(side=tk.LEFT, padx=2)
+        self.rotate_button = ttk.Button(
+            self.toolbar_row1, text="ROTATE (R)", command=self._rotate_active_selection, style="Tool.TButton"
+        )
+        self.rotate_button.pack(side=tk.LEFT, padx=2)
         self.remove_button = ttk.Button(self.toolbar_row1, text="REMOVE (Del)", command=self._toggle_delete_mode, style="Tool.TButton")
         self.remove_button.pack(side=tk.LEFT, padx=2)
         self.save_button = ttk.Button(self.toolbar_row1, text="SAVE (Ctrl+S)", command=self._save_json, style="Tool.TButton")
@@ -244,6 +251,7 @@ class DiagramApp:
         self.root.bind("l", lambda _event: self._toggle_wire_name_mode())
         self.root.bind("f", lambda _event: self._bring_active_front())
         self.root.bind("b", lambda _event: self._send_active_back())
+        self.root.bind("r", lambda _event: self._rotate_active_selection())
         self.root.bind("<Escape>", lambda _event: self._handle_escape())
         self.root.bind("<Control-p>", lambda _event: self._save_png())
         self.root.bind("<Tab>", lambda _event: self._toggle_wire_arrow())
@@ -253,7 +261,7 @@ class DiagramApp:
 
     _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF")
 
-    def _render_gate_image(self, kind: str, w: int, h: int) -> "tk.PhotoImage | None":
+    def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0) -> "tk.PhotoImage | None":
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
@@ -275,6 +283,16 @@ class DiagramApp:
                 return ImageFont.load_default(size=size * scale)
             except Exception:
                 return ImageFont.load_default()
+
+        def _arc_points(cx, cy, radius, start_deg, end_deg, steps=60):
+            import math
+
+            points = []
+            for i in range(steps + 1):
+                t = i / steps
+                angle = math.radians(start_deg + (end_deg - start_deg) * t)
+                points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+            return points
 
         if kind.startswith("MUX"):
             indent = int(sh * 0.2)
@@ -301,6 +319,8 @@ class DiagramApp:
             tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
             draw.polygon(tri_points, fill="white", outline="black", width=max(1, scale))
 
+        if rotation:
+            img = img.rotate(-rotation, expand=True)
         img = img.resize((w, h), Image.LANCZOS)
         return ImageTk.PhotoImage(img)
 
@@ -309,7 +329,7 @@ class DiagramApp:
         w, h = node.width, node.height
         kind = node.kind
 
-        gate_img = self._render_gate_image(kind, w, h)
+        gate_img = self._render_gate_image(kind, w, h, rotation=node.rotation)
         if gate_img:
             node.image = gate_img
             node.image_id = self.canvas.create_image(x1, y1, image=gate_img, anchor="nw")
@@ -332,6 +352,12 @@ class DiagramApp:
                 )
                 node.items.append(poly)
             elif kind == "DFF":
+                rect = self.canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill="white", outline="black", width=lw,
+                )
+                node.items.append(rect)
+            else:
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
                     fill="white", outline="black", width=lw,
@@ -432,9 +458,9 @@ class DiagramApp:
             if connection.label and not connection.src and not connection.dst:
                 lx = connection.label_x if connection.label_x is not None else 200
                 ly = connection.label_y if connection.label_y is not None else 200
-                font = (connection.label_font_family, connection.label_font_size)
+                font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
                 connection.label_id = self.canvas.create_text(
-                    lx, ly, text=connection.label, font=font, anchor="s",
+                    lx, ly, text=connection.label, font=font, anchor="s", angle=connection.label_angle,
                 )
                 self.canvas.addtag_withtag("label", connection.label_id)
             return
@@ -452,13 +478,14 @@ class DiagramApp:
                 label_x, label_y = connection.label_x, connection.label_y
             else:
                 label_x, label_y = self._label_position(coords)
-            font = (connection.label_font_family, connection.label_font_size)
+            font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
             label_id = self.canvas.create_text(
                 label_x,
                 label_y,
                 text=connection.label,
                 font=font,
                 anchor="s",
+                angle=connection.label_angle,
             )
             self.canvas.addtag_withtag("label", label_id)
             connection.label_id = label_id
@@ -1543,6 +1570,10 @@ class DiagramApp:
         size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
         size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
+        bold_var = tk.BooleanVar(value=connection.label_font_weight == "bold")
+        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var)
+        bold_check.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
         result = {"ok": False}
 
         def on_ok(_event=None):
@@ -1555,7 +1586,7 @@ class DiagramApp:
         text_entry.bind("<Return>", on_ok)
         dialog.bind("<Escape>", on_cancel)
         btn_frame = tk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=10)
         tk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=5)
 
@@ -1571,10 +1602,16 @@ class DiagramApp:
             connection.label_font_size = int(size_var.get())
         except (ValueError, tk.TclError):
             connection.label_font_size = 12
-        font = (connection.label_font_family, connection.label_font_size)
+        connection.label_font_weight = "bold" if bold_var.get() else "normal"
+        font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
         if connection.label:
             if connection.label_id:
-                self.canvas.itemconfig(connection.label_id, text=connection.label, font=font)
+                self.canvas.itemconfig(
+                    connection.label_id,
+                    text=connection.label,
+                    font=font,
+                    angle=connection.label_angle,
+                )
             else:
                 coords = self._connection_line_coords(connection)
                 if coords:
@@ -1583,7 +1620,7 @@ class DiagramApp:
                     else:
                         lx, ly = self._label_position(coords)
                     connection.label_id = self.canvas.create_text(
-                        lx, ly, text=connection.label, font=font, anchor="s",
+                        lx, ly, text=connection.label, font=font, anchor="s", angle=connection.label_angle,
                     )
                     self.canvas.addtag_withtag("label", connection.label_id)
         else:
@@ -2241,6 +2278,61 @@ class DiagramApp:
         else:
             self._mode = "normal"
 
+    def _rotate_active_selection(self):
+        if self._selected_label_conn and self._selected_label_conn.label_id:
+            self._rotate_label(self._selected_label_conn)
+            return
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node:
+            return
+        self._rotate_node(node)
+
+    def _rotate_label(self, connection: Connection):
+        connection.label_angle = (connection.label_angle + 90) % 360
+        if connection.label_id:
+            self.canvas.itemconfig(connection.label_id, angle=connection.label_angle)
+        self._record_history()
+
+    def _rotate_node(self, node: Node):
+        cx = node.x + node.width / 2
+        cy = node.y + node.height / 2
+        old_positions = [(port, self._port_position(node, port)) for port in node.inputs + node.outputs]
+        new_width, new_height = node.height, node.width
+        node.rotation = (node.rotation + 90) % 360
+        node.width = new_width
+        node.height = new_height
+        node.x = self._snap_value(cx - new_width / 2)
+        node.y = self._snap_value(cy - new_height / 2)
+        new_cx = node.x + node.width / 2
+        new_cy = node.y + node.height / 2
+        shift_x = new_cx - cx
+        shift_y = new_cy - cy
+        left, right = node.x, node.x + node.width
+        top, bottom = node.y, node.y + node.height
+        for port, (px, py) in old_positions:
+            rx = cx + (py - cy) + shift_x
+            ry = cy - (px - cx) + shift_y
+            distances = {
+                "left": abs(rx - left),
+                "right": abs(rx - right),
+                "top": abs(ry - top),
+                "bottom": abs(ry - bottom),
+            }
+            side = min(distances, key=distances.get)
+            port.side = side
+            if side in ("left", "right"):
+                port.manual_y = ry
+                port.offset = 0 if node.height == 0 else (ry - top) / node.height
+            else:
+                port.manual_y = None
+                port.offset = 0 if node.width == 0 else (rx - left) / node.width
+        self._clamp_ports_to_node(node)
+        self._redraw_node(node)
+        self._update_connections()
+        self._record_history()
+
     def _toggle_wire_name_mode(self):
         if self._selected_wire:
             self._open_label_dialog(self._selected_wire, is_new=(self._selected_wire.label is None))
@@ -2270,6 +2362,10 @@ class DiagramApp:
         size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
         size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
+        bold_var = tk.BooleanVar(value=False)
+        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var)
+        bold_check.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+
         result = {"ok": False}
 
         def on_ok(_event=None):
@@ -2282,7 +2378,7 @@ class DiagramApp:
         text_entry.bind("<Return>", on_ok)
         dialog.bind("<Escape>", on_cancel)
         btn_frame = tk.Frame(dialog)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=10)
         tk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=5)
 
@@ -2302,11 +2398,12 @@ class DiagramApp:
         connection = Connection(src=None, dst=None, label=new_text)
         connection.label_font_family = font_family
         connection.label_font_size = font_size
+        connection.label_font_weight = "bold" if bold_var.get() else "normal"
         connection.label_x = cx
         connection.label_y = cy
-        font = (font_family, font_size)
+        font = (font_family, font_size, connection.label_font_weight)
         connection.label_id = self.canvas.create_text(
-            cx, cy, text=new_text, font=font, anchor="s",
+            cx, cy, text=new_text, font=font, anchor="s", angle=connection.label_angle,
         )
         self.canvas.addtag_withtag("label", connection.label_id)
         self.connections.append(connection)
@@ -2518,6 +2615,7 @@ class DiagramApp:
                     "font_size": node.label_font_size,
                     "font_family": node.label_font_family,
                     "font_weight": node.label_font_weight,
+                    "rotation": node.rotation,
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -2538,6 +2636,10 @@ class DiagramApp:
                     conn_entry["label_font_family"] = connection.label_font_family
                 if connection.label_font_size != 12:
                     conn_entry["label_font_size"] = connection.label_font_size
+                if connection.label_font_weight != "normal":
+                    conn_entry["label_font_weight"] = connection.label_font_weight
+                if connection.label_angle:
+                    conn_entry["label_angle"] = connection.label_angle
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -2553,6 +2655,10 @@ class DiagramApp:
                 wire_data["label_font_family"] = connection.label_font_family
             if connection.label_font_size != 12:
                 wire_data["label_font_size"] = connection.label_font_size
+            if connection.label_font_weight != "normal":
+                wire_data["label_font_weight"] = connection.label_font_weight
+            if connection.label_angle:
+                wire_data["label_angle"] = connection.label_angle
             if connection.label_x is not None:
                 wire_data["label_x"] = _unscale(connection.label_x)
             if connection.label_y is not None:
@@ -2633,6 +2739,7 @@ class DiagramApp:
             "Buttons & Shortcuts\n"
             "- NEW (I): create a new block or gate.\n"
             "- EDIT (E): edit the selected block.\n"
+            "- ROTATE (R): rotate the selected block/gate/label 90° clockwise.\n"
             "- DELETE (Del): toggle delete mode (items blink red, click to remove, Del to exit).\n"
             "- SAVE (Ctrl+S): save to input.json.\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
@@ -2750,7 +2857,17 @@ class DiagramApp:
             def _color(c: str) -> str | None:
                 if not c or c == "":
                     return None
-                return c
+                try:
+                    r, g, b = self.canvas.winfo_rgb(c)
+                except tk.TclError:
+                    return c
+                return f"#{r // 256:02x}{g // 256:02x}{b // 256:02x}"
+
+            image_lookup = {
+                node.image_id: node.image
+                for node in self.nodes.values()
+                if node.image_id and node.image
+            }
 
             for item_id in self.canvas.find_all():
                 item_type = self.canvas.type(item_id)
@@ -2798,9 +2915,34 @@ class DiagramApp:
                         pil_font = self._parse_tk_font(font_str)
                         anchor = self.canvas.itemcget(item_id, "anchor") or "center"
                         pil_anchor = {"s": "ms", "n": "mt", "center": "mm", "w": "lm", "e": "rm", "nw": "lt", "sw": "lb"}.get(anchor, "mm")
-                        draw.text((tc[0], tc[1]), text, fill=fill, font=pil_font, anchor=pil_anchor)
+                        angle_str = self.canvas.itemcget(item_id, "angle") or "0"
+                        try:
+                            angle = float(angle_str)
+                        except ValueError:
+                            angle = 0.0
+                        if angle:
+                            bbox = draw.textbbox((0, 0), text, font=pil_font, anchor="lt")
+                            text_w = max(1, bbox[2] - bbox[0])
+                            text_h = max(1, bbox[3] - bbox[1])
+                            text_img = Image.new("RGBA", (text_w, text_h), (255, 255, 255, 0))
+                            text_draw = ImageDraw.Draw(text_img)
+                            text_draw.text((0, 0), text, fill=fill, font=pil_font, anchor="lt")
+                            rotated = text_img.rotate(-angle, expand=True)
+                            rx = int(tc[0] - rotated.width / 2)
+                            ry = int(tc[1] - rotated.height / 2)
+                            img.paste(rotated, (rx, ry), rotated)
+                        else:
+                            draw.text((tc[0], tc[1]), text, fill=fill, font=pil_font, anchor=pil_anchor)
                 elif item_type == "image":
-                    pass
+                    photo = image_lookup.get(item_id)
+                    if photo:
+                        from PIL import ImageTk
+
+                        pil_img = ImageTk.getimage(photo)
+                        if pil_img.mode != "RGBA":
+                            pil_img = pil_img.convert("RGBA")
+                        px, py = int(tc[0]), int(tc[1])
+                        img.paste(pil_img, (px, py), pil_img)
             img.save(path)
         except Exception as exc:
             print(f"PNG 저장 실패: {exc}")
@@ -2825,6 +2967,7 @@ class DiagramApp:
         from PIL import ImageFont
         parts = font_str.replace("{", "").replace("}", "").split()
         size = 12
+        is_bold = any(part.lower() == "bold" for part in parts)
         for p in parts:
             try:
                 s = int(p)
@@ -2833,6 +2976,15 @@ class DiagramApp:
                     break
             except ValueError:
                 continue
+        if is_bold:
+            try:
+                return ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+            except Exception:
+                pass
+            try:
+                return ImageFont.truetype("arialbd.ttf", size)
+            except Exception:
+                pass
         try:
             return ImageFont.truetype("DejaVuSans.ttf", size)
         except Exception:
@@ -2948,6 +3100,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
         font_size = int(block.get("font_size", 12))
         font_family = str(block.get("font_family", "Arial"))
         font_weight = str(block.get("font_weight", "bold"))
+        rotation = int(block.get("rotation", 0) or 0)
         node = Node(
             name=name,
             kind=kind,
@@ -2967,6 +3120,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             label_font_family=font_family,
             label_font_weight=font_weight,
             level=int(level) if level is not None else 0,
+            rotation=rotation,
         )
         if node.kind != "BLOCK":
             node.image_subsample = 0
@@ -3004,6 +3158,10 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                 connection.label_font_family = str(entry["label_font_family"])
             if "label_font_size" in entry:
                 connection.label_font_size = int(entry["label_font_size"])
+            if "label_font_weight" in entry:
+                connection.label_font_weight = str(entry["label_font_weight"])
+            if "label_angle" in entry and entry["label_angle"] is not None:
+                connection.label_angle = int(entry["label_angle"])
         connections.append(connection)
 
     if wires_data:
@@ -3025,6 +3183,10 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.label_font_family = str(wire["label_font_family"])
                     if "label_font_size" in wire:
                         connection.label_font_size = int(wire["label_font_size"])
+                    if "label_font_weight" in wire:
+                        connection.label_font_weight = str(wire["label_font_weight"])
+                    if "label_angle" in wire and wire["label_angle"] is not None:
+                        connection.label_angle = int(wire["label_angle"])
                     if "label_x" in wire and wire["label_x"] is not None:
                         connection.label_x = float(wire["label_x"])
                     if "label_y" in wire and wire["label_y"] is not None:
