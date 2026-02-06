@@ -40,6 +40,7 @@ class Node:
     label_font_family: str = "Arial"
     label_font_weight: str = "bold"
     level: int = 0
+    rotation: int = 0
     image: tk.PhotoImage | None = None
     image_id: int | None = None
     image_subsample: int = 10
@@ -56,6 +57,8 @@ class Connection:
     label_id: int | None = None
     label_font_family: str = "Arial"
     label_font_size: int = 12
+    label_font_weight: str = "normal"
+    label_angle: int = 0
     label_x: float | None = None
     label_y: float | None = None
     waypoints: list[tuple[float, float]] = field(default_factory=list)
@@ -133,6 +136,8 @@ class DiagramApp:
         self.new_button.pack(side=tk.LEFT, padx=2)
         self.edit_button = ttk.Button(self.toolbar_row1, text="EDIT (E)", command=self._open_edit_block, style="Tool.TButton")
         self.edit_button.pack(side=tk.LEFT, padx=2)
+        self.rotate_button = ttk.Button(self.toolbar_row1, text="ROATE (R)", command=self._rotate_active_selection, style="Tool.TButton")
+        self.rotate_button.pack(side=tk.LEFT, padx=2)
         self.remove_button = ttk.Button(self.toolbar_row1, text="REMOVE (Del)", command=self._toggle_delete_mode, style="Tool.TButton")
         self.remove_button.pack(side=tk.LEFT, padx=2)
         self.save_button = ttk.Button(self.toolbar_row1, text="SAVE (Ctrl+S)", command=self._save_json, style="Tool.TButton")
@@ -229,6 +234,8 @@ class DiagramApp:
         self.canvas.bind("<Control-Button-5>", self._on_zoom_wheel)
         self.root.bind("i", lambda _event: self._open_new_block())
         self.root.bind("e", lambda _event: self._handle_edit_key())
+        self.root.bind("r", lambda _event: self._rotate_active_selection())
+        self.root.bind("R", lambda _event: self._rotate_active_selection())
         self.root.bind("<Delete>", lambda _event: self._toggle_delete_mode())
         self.root.bind("<Control-a>", lambda _event: self._toggle_delete_port_mode())
         self.root.bind("`", lambda _event: self._toggle_ports())
@@ -262,7 +269,7 @@ class DiagramApp:
                 width_ratio = base_w / max(1, node.width)
                 height_ratio = base_h / max(1, node.height)
                 node.image_subsample = max(1, int(round(max(width_ratio, height_ratio))))
-            image = self._load_gate_image(node.kind, node.image_subsample)
+            image = self._load_gate_image(node.kind, node.image_subsample, node.rotation)
             if image:
                 node.image = image
                 node.width = image.width()
@@ -341,9 +348,14 @@ class DiagramApp:
             if connection.label and not connection.src and not connection.dst:
                 lx = connection.label_x if connection.label_x is not None else 200
                 ly = connection.label_y if connection.label_y is not None else 200
-                font = (connection.label_font_family, connection.label_font_size)
+                font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
                 connection.label_id = self.canvas.create_text(
-                    lx, ly, text=connection.label, font=font, anchor="s",
+                    lx,
+                    ly,
+                    text=connection.label,
+                    font=font,
+                    anchor="s",
+                    angle=connection.label_angle,
                 )
                 self.canvas.addtag_withtag("label", connection.label_id)
             return
@@ -361,13 +373,14 @@ class DiagramApp:
                 label_x, label_y = connection.label_x, connection.label_y
             else:
                 label_x, label_y = self._label_position(coords)
-            font = (connection.label_font_family, connection.label_font_size)
+            font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
             label_id = self.canvas.create_text(
                 label_x,
                 label_y,
                 text=connection.label,
                 font=font,
                 anchor="s",
+                angle=connection.label_angle,
             )
             self.canvas.addtag_withtag("label", label_id)
             connection.label_id = label_id
@@ -760,6 +773,15 @@ class DiagramApp:
         if not color:
             return "GRAY"
         return cls.COLOR_HEX_TO_NAME.get(color.lower(), color)
+
+    def _resolve_tk_color(self, color: str | None) -> str | None:
+        if not color:
+            return None
+        try:
+            rgb = self.root.winfo_rgb(color)
+        except tk.TclError:
+            return color
+        return "#{:02x}{:02x}{:02x}".format(rgb[0] // 256, rgb[1] // 256, rgb[2] // 256)
 
     def _raise_connection(self, connection: Connection):
         if connection.line_id:
@@ -1429,6 +1451,101 @@ class DiagramApp:
             return
         self._open_edit_block()
 
+    def _rotate_active_selection(self):
+        if self._selected_label_conn:
+            self._rotate_label(self._selected_label_conn)
+            return
+        if not self._active_node_name:
+            return
+        node = self.nodes.get(self._active_node_name)
+        if not node:
+            return
+        self._rotate_node(node)
+
+    def _rotate_label(self, connection: Connection):
+        if not connection.label_id:
+            return
+        connection.label_angle = (connection.label_angle + 90) % 360
+        self.canvas.itemconfig(connection.label_id, angle=connection.label_angle)
+        self._record_history()
+
+    @staticmethod
+    def _port_position_for_bounds(
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        port: Port,
+    ) -> tuple[float, float]:
+        if port.side == "left":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x1, py)
+        if port.side == "right":
+            py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
+            return (x2, py)
+        if port.side == "top":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y1)
+        if port.side == "bottom":
+            px = x1 + port.offset * (x2 - x1)
+            return (px, y2)
+        py = port.manual_y if port.manual_y is not None else (y1 + y2) / 2
+        return (x1, py)
+
+    def _rotate_node(self, node: Node):
+        old_x1, old_y1 = node.x, node.y
+        old_x2, old_y2 = node.x + node.width, node.y + node.height
+        cx = (old_x1 + old_x2) / 2
+        cy = (old_y1 + old_y2) / 2
+        new_rotation = (node.rotation + 90) % 360
+        if node.kind != "BLOCK":
+            image = self._load_gate_image(node.kind, node.image_subsample, new_rotation)
+            if image:
+                new_width, new_height = image.width(), image.height()
+            else:
+                new_width, new_height = node.height, node.width
+        else:
+            new_width, new_height = node.height, node.width
+        node.rotation = new_rotation
+        node.width = new_width
+        node.height = new_height
+        node.x = cx - new_width / 2
+        node.y = cy - new_height / 2
+        new_x1, new_y1 = node.x, node.y
+        new_x2, new_y2 = node.x + node.width, node.y + node.height
+        radius = self.PORT_RADIUS
+        for port in node.inputs + node.outputs:
+            px, py = self._port_position_for_bounds(old_x1, old_y1, old_x2, old_y2, port)
+            dx = px - cx
+            dy = py - cy
+            new_px = cx + dy
+            new_py = cy - dx
+            distances = {
+                "left": abs(new_px - new_x1),
+                "right": abs(new_px - new_x2),
+                "top": abs(new_py - new_y1),
+                "bottom": abs(new_py - new_y2),
+            }
+            side = min(distances, key=distances.get)
+            port.side = side
+            if side in ("left", "right"):
+                min_y = new_y1 + radius
+                max_y = new_y2 - radius
+                snapped_y = self._snap_value(new_py, int(min_y))
+                port.manual_y = max(min_y, min(snapped_y, max_y))
+                port.offset = 0 if new_y2 == new_y1 else (port.manual_y - new_y1) / (new_y2 - new_y1)
+            else:
+                min_x = new_x1 + radius
+                max_x = new_x2 - radius
+                snapped_x = self._snap_value(new_px, int(min_x))
+                clamped_x = max(min_x, min(snapped_x, max_x))
+                port.offset = 0 if new_x2 == new_x1 else (clamped_x - new_x1) / (new_x2 - new_x1)
+                port.manual_y = None
+        self._clamp_ports_to_node(node)
+        self._redraw_node(node)
+        self._update_connections()
+        self._record_history()
+
     def _open_label_dialog(self, connection: Connection, is_new: bool = False):
         dialog = tk.Toplevel(self.root)
         dialog.title("LABEL")
@@ -1451,6 +1568,9 @@ class DiagramApp:
         size_var = tk.IntVar(value=connection.label_font_size)
         size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
         size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        bold_var = tk.BooleanVar(value=connection.label_font_weight == "bold")
+        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var)
+        bold_check.grid(row=2, column=2, sticky="w", padx=5, pady=5)
 
         result = {"ok": False}
 
@@ -1480,10 +1600,11 @@ class DiagramApp:
             connection.label_font_size = int(size_var.get())
         except (ValueError, tk.TclError):
             connection.label_font_size = 12
-        font = (connection.label_font_family, connection.label_font_size)
+        connection.label_font_weight = "bold" if bold_var.get() else "normal"
+        font = (connection.label_font_family, connection.label_font_size, connection.label_font_weight)
         if connection.label:
             if connection.label_id:
-                self.canvas.itemconfig(connection.label_id, text=connection.label, font=font)
+                self.canvas.itemconfig(connection.label_id, text=connection.label, font=font, angle=connection.label_angle)
             else:
                 coords = self._connection_line_coords(connection)
                 if coords:
@@ -1492,7 +1613,12 @@ class DiagramApp:
                     else:
                         lx, ly = self._label_position(coords)
                     connection.label_id = self.canvas.create_text(
-                        lx, ly, text=connection.label, font=font, anchor="s",
+                        lx,
+                        ly,
+                        text=connection.label,
+                        font=font,
+                        anchor="s",
+                        angle=connection.label_angle,
                     )
                     self.canvas.addtag_withtag("label", connection.label_id)
         else:
@@ -2178,6 +2304,9 @@ class DiagramApp:
         size_var = tk.IntVar(value=12)
         size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
         size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        bold_var = tk.BooleanVar(value=False)
+        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var)
+        bold_check.grid(row=2, column=2, sticky="w", padx=5, pady=5)
 
         result = {"ok": False}
 
@@ -2206,16 +2335,18 @@ class DiagramApp:
             font_size = int(size_var.get())
         except (ValueError, tk.TclError):
             font_size = 12
+        font_weight = "bold" if bold_var.get() else "normal"
         cx = self.canvas.canvasx(self.canvas.winfo_width() / 2)
         cy = self.canvas.canvasy(self.canvas.winfo_height() / 2)
         connection = Connection(src=None, dst=None, label=new_text)
         connection.label_font_family = font_family
         connection.label_font_size = font_size
+        connection.label_font_weight = font_weight
         connection.label_x = cx
         connection.label_y = cy
-        font = (font_family, font_size)
+        font = (font_family, font_size, font_weight)
         connection.label_id = self.canvas.create_text(
-            cx, cy, text=new_text, font=font, anchor="s",
+            cx, cy, text=new_text, font=font, anchor="s", angle=connection.label_angle,
         )
         self.canvas.addtag_withtag("label", connection.label_id)
         self.connections.append(connection)
@@ -2427,6 +2558,7 @@ class DiagramApp:
                     "font_size": node.label_font_size,
                     "font_family": node.label_font_family,
                     "font_weight": node.label_font_weight,
+                    "rotation": node.rotation,
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -2447,6 +2579,10 @@ class DiagramApp:
                     conn_entry["label_font_family"] = connection.label_font_family
                 if connection.label_font_size != 12:
                     conn_entry["label_font_size"] = connection.label_font_size
+                if connection.label_font_weight != "normal":
+                    conn_entry["label_font_weight"] = connection.label_font_weight
+                if connection.label_angle:
+                    conn_entry["label_angle"] = connection.label_angle
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -2462,6 +2598,10 @@ class DiagramApp:
                 wire_data["label_font_family"] = connection.label_font_family
             if connection.label_font_size != 12:
                 wire_data["label_font_size"] = connection.label_font_size
+            if connection.label_font_weight != "normal":
+                wire_data["label_font_weight"] = connection.label_font_weight
+            if connection.label_angle:
+                wire_data["label_angle"] = connection.label_angle
             if connection.label_x is not None:
                 wire_data["label_x"] = _unscale(connection.label_x)
             if connection.label_y is not None:
@@ -2542,6 +2682,7 @@ class DiagramApp:
             "Buttons & Shortcuts\n"
             "- NEW (I): create a new block or gate.\n"
             "- EDIT (E): edit the selected block.\n"
+            "- ROATE (R): rotate the selected block/gate/label 90° clockwise.\n"
             "- DELETE (Del): toggle delete mode (items blink red, click to remove, Del to exit).\n"
             "- SAVE (Ctrl+S): save to input.json.\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
@@ -2613,16 +2754,39 @@ class DiagramApp:
         self._gate_source_images[gate_kind] = image
         return image
 
-    def _load_gate_image(self, gate_kind: str, subsample: int) -> tk.PhotoImage | None:
-        key = (gate_kind, subsample)
+    def _load_gate_image(self, gate_kind: str, subsample: int, rotation: int = 0) -> tk.PhotoImage | None:
+        rotation = rotation % 360
+        key = (gate_kind, subsample, rotation)
         if key in self._gate_images:
             return self._gate_images[key]
-        base_image = self._gate_base_image(gate_kind)
-        if not base_image:
-            return None
-        image = base_image.subsample(subsample, subsample)
-        self._gate_images[key] = image
-        return image
+        if rotation == 0:
+            base_image = self._gate_base_image(gate_kind)
+            if not base_image:
+                return None
+            image = base_image.subsample(subsample, subsample)
+            self._gate_images[key] = image
+            return image
+        try:
+            from PIL import Image, ImageTk
+
+            image_path = Path(__file__).resolve().parent / "gate_image" / f"{gate_kind}.png"
+            if not image_path.exists():
+                return None
+            pil_image = Image.open(image_path)
+            pil_image = pil_image.rotate(-rotation, expand=True)
+            if subsample > 1:
+                new_size = (max(1, pil_image.width // subsample), max(1, pil_image.height // subsample))
+                pil_image = pil_image.resize(new_size, Image.LANCZOS)
+            image = ImageTk.PhotoImage(pil_image)
+            self._gate_images[key] = image
+            return image
+        except Exception:
+            base_image = self._gate_base_image(gate_kind)
+            if not base_image:
+                return None
+            image = base_image.subsample(subsample, subsample)
+            self._gate_images[key] = image
+            return image
 
     @staticmethod
     def _gate_definitions_static() -> dict[str, dict[str, int]]:
@@ -2659,7 +2823,7 @@ class DiagramApp:
             def _color(c: str) -> str | None:
                 if not c or c == "":
                     return None
-                return c
+                return self._resolve_tk_color(c)
 
             for item_id in self.canvas.find_all():
                 item_type = self.canvas.type(item_id)
@@ -2850,6 +3014,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
         font_size = int(block.get("font_size", 12))
         font_family = str(block.get("font_family", "Arial"))
         font_weight = str(block.get("font_weight", "bold"))
+        rotation = int(block.get("rotation", 0))
         node = Node(
             name=name,
             kind=kind,
@@ -2869,6 +3034,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             label_font_family=font_family,
             label_font_weight=font_weight,
             level=int(level) if level is not None else 0,
+            rotation=rotation,
         )
         if node.kind != "BLOCK":
             node.image_subsample = 0
@@ -2906,6 +3072,10 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                 connection.label_font_family = str(entry["label_font_family"])
             if "label_font_size" in entry:
                 connection.label_font_size = int(entry["label_font_size"])
+            if "label_font_weight" in entry:
+                connection.label_font_weight = str(entry["label_font_weight"])
+            if "label_angle" in entry:
+                connection.label_angle = int(entry["label_angle"])
         connections.append(connection)
 
     if wires_data:
@@ -2927,6 +3097,10 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.label_font_family = str(wire["label_font_family"])
                     if "label_font_size" in wire:
                         connection.label_font_size = int(wire["label_font_size"])
+                    if "label_font_weight" in wire:
+                        connection.label_font_weight = str(wire["label_font_weight"])
+                    if "label_angle" in wire:
+                        connection.label_angle = int(wire["label_angle"])
                     if "label_x" in wire and wire["label_x"] is not None:
                         connection.label_x = float(wire["label_x"])
                     if "label_y" in wire and wire["label_y"] is not None:
