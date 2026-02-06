@@ -338,6 +338,14 @@ class DiagramApp:
     def _draw_connection(self, connection: Connection):
         coords = self._connection_line_coords(connection)
         if not coords:
+            if connection.label and not connection.src and not connection.dst:
+                lx = connection.label_x if connection.label_x is not None else 200
+                ly = connection.label_y if connection.label_y is not None else 200
+                font = (connection.label_font_family, connection.label_font_size)
+                connection.label_id = self.canvas.create_text(
+                    lx, ly, text=connection.label, font=font, anchor="s",
+                )
+                self.canvas.addtag_withtag("label", connection.label_id)
             return
         line = self.canvas.create_line(
             *coords,
@@ -985,17 +993,6 @@ class DiagramApp:
                 return
             self._remove_connection(connection)
             return
-        if self._mode == "wire_name":
-            item = self.canvas.find_withtag("current")
-            if not item:
-                return
-            line_id = item[0]
-            connection = next((conn for conn in self.connections if conn.line_id == line_id), None)
-            if not connection:
-                return
-            self._open_label_dialog(connection, is_new=True)
-            self._toggle_wire_name_mode()
-            return
         if self._mode != "normal":
             return
         self._deselect_label()
@@ -1344,7 +1341,6 @@ class DiagramApp:
             "connect": "connect",
             "create_port": "create port",
             "delete_port": "delete port",
-            "wire_name": "label",
         }
         mode_text = mode_map.get(self._mode, self._mode)
         if self._delete_mode:
@@ -1416,7 +1412,7 @@ class DiagramApp:
         if self._delete_mode:
             self._toggle_delete_mode()
             return
-        if self._mode in ("connect", "create_port", "delete_port", "wire_name"):
+        if self._mode in ("connect", "create_port", "delete_port"):
             self._reset_port_mode()
         if self._active_node_name:
             node = self.nodes.get(self._active_node_name)
@@ -1880,7 +1876,7 @@ class DiagramApp:
         if self._mode == "connect":
             self._reset_connect_mode()
             return
-        if self._mode in ("create_port", "delete_port", "wire_name"):
+        if self._mode in ("create_port", "delete_port"):
             self._reset_port_mode()
         self._mode = "connect"
         self._selected_ports = []
@@ -1942,7 +1938,7 @@ class DiagramApp:
             self._delete_mode = False
             self._mode = "normal"
             return
-        if self._mode in ("connect", "create_port", "delete_port", "wire_name"):
+        if self._mode in ("connect", "create_port", "delete_port"):
             self._reset_port_mode()
         self._delete_mode = True
         self._delete_blink_on = False
@@ -2119,7 +2115,7 @@ class DiagramApp:
             return
         if not self._active_node_name:
             return
-        if self._mode in ("connect", "delete_port", "wire_name"):
+        if self._mode in ("connect", "delete_port"):
             self._reset_port_mode()
         self._mode = "create_port"
         node = self.nodes.get(self._active_node_name)
@@ -2142,7 +2138,7 @@ class DiagramApp:
             return
         if not self._active_node_name:
             return
-        if self._mode in ("connect", "create_port", "wire_name"):
+        if self._mode in ("connect", "create_port"):
             self._reset_port_mode()
         self._mode = "delete_port"
         node = self.nodes.get(self._active_node_name)
@@ -2155,21 +2151,75 @@ class DiagramApp:
             self._mode = "normal"
 
     def _toggle_wire_name_mode(self):
-        if self._mode == "wire_name":
-            self._set_all_wire_widths(2)
-            self._set_all_wire_colors("#333333")
-            self._mode = "normal"
-            return
         if self._selected_wire:
             self._open_label_dialog(self._selected_wire, is_new=(self._selected_wire.label is None))
             return
-        if self._mode == "connect":
-            self._reset_connect_mode()
-        if self._mode in ("create_port", "delete_port"):
-            self._reset_port_mode()
-        self._mode = "wire_name"
-        self._set_all_wire_colors("blue")
-        self._set_all_wire_widths(4)
+        self._create_free_label()
+
+    def _create_free_label(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("LABEL")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="Text:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        text_var = tk.StringVar()
+        text_entry = tk.Entry(dialog, textvariable=text_var, width=30)
+        text_entry.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
+        text_entry.focus_set()
+
+        tk.Label(dialog, text="Font:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        font_families = ["Arial", "Helvetica", "Times New Roman", "Courier New", "Verdana", "Georgia"]
+        font_var = tk.StringVar(value="Arial")
+        font_combo = ttk.Combobox(dialog, textvariable=font_var, values=font_families, width=18)
+        font_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5)
+
+        tk.Label(dialog, text="Size:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        size_var = tk.IntVar(value=12)
+        size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
+        size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
+
+        result = {"ok": False}
+
+        def on_ok(_event=None):
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel(_event=None):
+            dialog.destroy()
+
+        text_entry.bind("<Return>", on_ok)
+        dialog.bind("<Escape>", on_cancel)
+        btn_frame = tk.Frame(dialog)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        tk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=5)
+
+        dialog.wait_window()
+        if not result["ok"]:
+            return
+        new_text = text_var.get()
+        if not new_text:
+            return
+        font_family = font_var.get() or "Arial"
+        try:
+            font_size = int(size_var.get())
+        except (ValueError, tk.TclError):
+            font_size = 12
+        cx = self.canvas.canvasx(self.canvas.winfo_width() / 2)
+        cy = self.canvas.canvasy(self.canvas.winfo_height() / 2)
+        connection = Connection(src=None, dst=None, label=new_text)
+        connection.label_font_family = font_family
+        connection.label_font_size = font_size
+        connection.label_x = cx
+        connection.label_y = cy
+        font = (font_family, font_size)
+        connection.label_id = self.canvas.create_text(
+            cx, cy, text=new_text, font=font, anchor="s",
+        )
+        self.canvas.addtag_withtag("label", connection.label_id)
+        self.connections.append(connection)
+        self._record_history()
 
     def _reset_port_mode(self):
         if self._mode == "connect":
@@ -2188,9 +2238,6 @@ class DiagramApp:
                 node.resize_enabled = False
                 node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
                 self._redraw_node(node)
-        if self._mode == "wire_name":
-            self._set_all_wire_colors("#333333")
-            self._set_all_wire_widths(2)
         self._mode = "normal"
 
     def _handle_create_port_click(self, event):
@@ -2386,13 +2433,23 @@ class DiagramApp:
         connections = []
         wires = []
         for connection in self.connections:
-            connections.append(
-                {
-                    "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
-                    "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
-                    "label": connection.label,
-                }
-            )
+            conn_entry = {
+                "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
+                "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
+                "label": connection.label,
+            }
+            if not connection.src and not connection.dst:
+                if connection.label_x is not None:
+                    conn_entry["label_x"] = _unscale(connection.label_x)
+                if connection.label_y is not None:
+                    conn_entry["label_y"] = _unscale(connection.label_y)
+                if connection.label_font_family != "Arial":
+                    conn_entry["label_font_family"] = connection.label_font_family
+                if connection.label_font_size != 12:
+                    conn_entry["label_font_size"] = connection.label_font_size
+            connections.append(conn_entry)
+            if not connection.src and not connection.dst:
+                continue
             wire_data = {
                 "src": f"{connection.src[0]}.{connection.src[1]}" if connection.src else None,
                 "dst": f"{connection.dst[0]}.{connection.dst[1]}" if connection.dst else None,
@@ -2587,16 +2644,109 @@ class DiagramApp:
     def save_diagram(self, path: Path):
         self.root.update()
         try:
-            from PIL import ImageGrab
+            from PIL import Image, ImageDraw, ImageFont
 
-            x = self.canvas.winfo_rootx()
-            y = self.canvas.winfo_rooty()
-            w = self.canvas.winfo_width()
-            h = self.canvas.winfo_height()
-            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            bbox = self.canvas.bbox("all")
+            if not bbox:
+                return
+            margin = 30
+            ox, oy = int(bbox[0] - margin), int(bbox[1] - margin)
+            w = int(bbox[2] - bbox[0] + 2 * margin)
+            h = int(bbox[3] - bbox[1] + 2 * margin)
+            img = Image.new("RGB", (w, h), "white")
+            draw = ImageDraw.Draw(img)
+
+            def _color(c: str) -> str | None:
+                if not c or c == "":
+                    return None
+                return c
+
+            for item_id in self.canvas.find_all():
+                item_type = self.canvas.type(item_id)
+                coords = self.canvas.coords(item_id)
+                if not coords:
+                    continue
+                tc = []
+                for i, c in enumerate(coords):
+                    tc.append(c - (ox if i % 2 == 0 else oy))
+                state = self.canvas.itemcget(item_id, "state")
+                if state == "hidden":
+                    continue
+                if item_type == "rectangle":
+                    fill = _color(self.canvas.itemcget(item_id, "fill"))
+                    outline = _color(self.canvas.itemcget(item_id, "outline")) or "black"
+                    lw = max(1, int(float(self.canvas.itemcget(item_id, "width") or 1)))
+                    draw.rectangle([tc[0], tc[1], tc[2], tc[3]], fill=fill, outline=outline, width=lw)
+                elif item_type == "line":
+                    fill = _color(self.canvas.itemcget(item_id, "fill")) or "black"
+                    lw = max(1, int(float(self.canvas.itemcget(item_id, "width") or 1)))
+                    points = [(tc[i], tc[i + 1]) for i in range(0, len(tc), 2)]
+                    if len(points) >= 2:
+                        draw.line(points, fill=fill, width=lw)
+                        arrow = self.canvas.itemcget(item_id, "arrow")
+                        if arrow in ("last", "both") and len(points) >= 2:
+                            ex, ey = points[-1]
+                            px, py = points[-2]
+                            self._draw_arrowhead(draw, px, py, ex, ey, fill, lw)
+                elif item_type == "oval":
+                    fill = _color(self.canvas.itemcget(item_id, "fill"))
+                    outline = _color(self.canvas.itemcget(item_id, "outline")) or "black"
+                    draw.ellipse([tc[0], tc[1], tc[2], tc[3]], fill=fill, outline=outline)
+                elif item_type == "text":
+                    fill = _color(self.canvas.itemcget(item_id, "fill")) or "black"
+                    text = self.canvas.itemcget(item_id, "text")
+                    if text:
+                        font_str = self.canvas.itemcget(item_id, "font")
+                        pil_font = self._parse_tk_font(font_str)
+                        anchor = self.canvas.itemcget(item_id, "anchor") or "center"
+                        pil_anchor = {"s": "ms", "n": "mt", "center": "mm", "w": "lm", "e": "rm", "nw": "lt", "sw": "lb"}.get(anchor, "mm")
+                        draw.text((tc[0], tc[1]), text, fill=fill, font=pil_font, anchor=pil_anchor)
+                elif item_type == "image":
+                    pass
             img.save(path)
         except Exception as exc:
             print(f"PNG 저장 실패: {exc}")
+
+    @staticmethod
+    def _draw_arrowhead(draw, px, py, ex, ey, fill, lw):
+        import math
+        dx, dy = ex - px, ey - py
+        length = math.hypot(dx, dy)
+        if length < 1:
+            return
+        udx, udy = dx / length, dy / length
+        size = max(8, lw * 3)
+        bx, by = ex - udx * size, ey - udy * size
+        nx, ny = -udy * size * 0.5, udx * size * 0.5
+        p1 = (bx + nx, by + ny)
+        p2 = (bx - nx, by - ny)
+        draw.polygon([(ex, ey), p1, p2], fill=fill)
+
+    @staticmethod
+    def _parse_tk_font(font_str: str):
+        from PIL import ImageFont
+        parts = font_str.replace("{", "").replace("}", "").split()
+        size = 12
+        for p in parts:
+            try:
+                s = int(p)
+                if s > 0:
+                    size = s
+                    break
+            except ValueError:
+                continue
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", size)
+        except Exception:
+            pass
+        try:
+            return ImageFont.truetype("arial.ttf", size)
+        except Exception:
+            pass
+        try:
+            return ImageFont.load_default(size=size)
+        except Exception:
+            return ImageFont.load_default()
 
     def run(self):
         self.root.mainloop()
@@ -2747,6 +2897,15 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             manual_mid_x=entry.get("manual_mid_x"),
             manual_mid_y=entry.get("manual_mid_y"),
         )
+        if not src and not dst:
+            if "label_x" in entry and entry["label_x"] is not None:
+                connection.label_x = float(entry["label_x"])
+            if "label_y" in entry and entry["label_y"] is not None:
+                connection.label_y = float(entry["label_y"])
+            if "label_font_family" in entry:
+                connection.label_font_family = str(entry["label_font_family"])
+            if "label_font_size" in entry:
+                connection.label_font_size = int(entry["label_font_size"])
         connections.append(connection)
 
     if wires_data:
