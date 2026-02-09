@@ -220,6 +220,7 @@ class DiagramApp:
         self._selected_label_border: int | None = None
         self._label_drag_data: dict[str, object] = {"connection": None, "x": 0, "y": 0}
         self._pending_port_node_select = False
+        self._wire_port_backup: dict[int, int] = {}
         self._create_wire_data: dict[str, object] = {
             "start": None,
             "preview_id": None,
@@ -1666,7 +1667,7 @@ class DiagramApp:
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
         if self._mode == "wire_port":
-            self._mode = "normal"
+            self._exit_wire_port_mode()
         if self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node and node.resize_enabled:
@@ -1688,13 +1689,13 @@ class DiagramApp:
     def _handle_s_key(self):
         if self._selected_wire and self._selected_wire.free_points:
             if self._mode == "wire_port":
-                self._mode = "normal"
+                self._exit_wire_port_mode()
                 return
             if self._mode in ("connect", "create_port", "delete_port"):
                 self._reset_port_mode()
             if self._mode == "create_wire":
                 self._reset_create_wire_mode()
-            self._mode = "wire_port"
+            self._enter_wire_port_mode()
             return
         self._toggle_resize_active_node()
 
@@ -2588,6 +2589,16 @@ class DiagramApp:
         if self._mode == "create_port":
             self._reset_port_mode()
             return
+        if self._selected_wire and self._selected_wire.free_points:
+            if self._mode == "wire_port":
+                self._exit_wire_port_mode()
+                return
+            if self._mode in ("connect", "create_port", "delete_port"):
+                self._reset_port_mode()
+            if self._mode == "create_wire":
+                self._reset_create_wire_mode()
+            self._enter_wire_port_mode()
+            return
         if not self._active_node_name and not self._selected_wire:
             return
         if self._mode in ("connect", "delete_port"):
@@ -2819,17 +2830,17 @@ class DiagramApp:
     def _handle_wire_port_click(self, event):
         connection = self._selected_wire
         if not connection or not connection.free_points:
-            self._mode = "normal"
+            self._exit_wire_port_mode()
             return
         coords = self._connection_line_coords(connection)
         if not coords or len(coords) < 4:
-            self._mode = "normal"
+            self._exit_wire_port_mode()
             return
         px, py = self._nearest_point_on_polyline(coords, event.x, event.y)
         if self._distance_squared(px, py, event.x, event.y) > (6.0 ** 2):
             return
         self._create_junction_at(px, py)
-        self._mode = "normal"
+        self._exit_wire_port_mode()
 
     def _create_junction_at(self, x: float, y: float):
         name = self._unique_node_name("Junction")
@@ -2861,6 +2872,24 @@ class DiagramApp:
         self._draw_node(node)
         self._apply_z_order(active_node_name=node.name)
         self._record_history()
+
+    def _enter_wire_port_mode(self):
+        connection = self._selected_wire
+        if not connection or not connection.line_id:
+            return
+        if connection.line_id not in self._wire_port_backup:
+            current_width = int(float(self.canvas.itemcget(connection.line_id, "width") or 0))
+            self._wire_port_backup[connection.line_id] = current_width
+        self.canvas.itemconfig(connection.line_id, width=max(6, self._wire_width(connection) + 3))
+        self._mode = "wire_port"
+
+    def _exit_wire_port_mode(self):
+        connection = self._selected_wire
+        if connection and connection.line_id:
+            original = self._wire_port_backup.pop(connection.line_id, None)
+            if original is not None:
+                self.canvas.itemconfig(connection.line_id, width=original)
+        self._mode = "normal"
 
     def _handle_delete_port_click(self, event):
         if not self._active_node_name:
@@ -3194,7 +3223,7 @@ class DiagramApp:
             "\n"
             "Tips\n"
             "- Hover a block/gate edge to highlight it, press S to resize (border turns yellow), click to finish.\n"
-            "- Select a free wire, press S, then click a point on the wire to place a junction port.\n"
+            "- Select a free wire, press A, then click a point on the wire to place a junction port.\n"
             "- In CONNECT mode, click empty space to add orthogonal bends. Multiple bends supported.\n"
         )
         label = tk.Label(window, text=text, justify="left", bg="white", font=("Arial", 10))
