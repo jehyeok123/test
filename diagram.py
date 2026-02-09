@@ -2502,6 +2502,9 @@ class DiagramApp:
         if self._mode == "create_port":
             self._reset_port_mode()
             return
+        if self._selected_wire and self._selected_wire.free_points:
+            self._create_junction_on_wire(self._selected_wire)
+            return
         if not self._active_node_name and not self._selected_wire:
             return
         if self._mode in ("connect", "delete_port"):
@@ -2523,6 +2526,60 @@ class DiagramApp:
             self._redraw_node(node)
         else:
             self._mode = "normal"
+
+    def _create_junction_on_wire(self, connection: Connection):
+        if not connection.free_points:
+            return
+        mid_x, mid_y = self._free_wire_midpoint(connection.free_points)
+        name = self._unique_node_name("Junction")
+        size = 12
+        node = Node(
+            name=name,
+            kind="PORT",
+            inputs=[],
+            outputs=[],
+            x=int(mid_x - size / 2),
+            y=int(mid_y - size / 2),
+            width=size,
+            height=size,
+            base_height=size,
+            level=self._next_level(),
+            fill_color="white",
+            outline_color="black",
+            outline_enabled=True,
+            outline_style="solid",
+            outline_scale=1.0,
+            label_font_size=1,
+            label_font_family="Arial",
+            label_font_weight="normal",
+        )
+        ports = [
+            Port(name="left", kind="io", side="left", offset=0.5),
+            Port(name="right", kind="io", side="right", offset=0.5),
+            Port(name="top", kind="io", side="top", offset=0.5),
+            Port(name="bottom", kind="io", side="bottom", offset=0.5),
+        ]
+        node.inputs = ports
+        self.nodes[name] = node
+        self._draw_node(node)
+        self._apply_z_order(active_node_name=node.name)
+        self._record_history()
+
+    def _unique_node_name(self, base: str) -> str:
+        index = 1
+        while True:
+            candidate = f"{base}{index}"
+            if candidate not in self.nodes:
+                return candidate
+            index += 1
+
+    @staticmethod
+    def _free_wire_midpoint(points: list[tuple[float, float]]) -> tuple[float, float]:
+        if len(points) < 2:
+            return (0.0, 0.0)
+        x1, y1 = points[0]
+        x2, y2 = points[-1]
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _toggle_delete_port_mode(self):
         if self._mode == "delete_port":
