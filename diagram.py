@@ -219,6 +219,7 @@ class DiagramApp:
         self._selected_label_conn: Connection | None = None
         self._selected_label_border: int | None = None
         self._label_drag_data: dict[str, object] = {"connection": None, "x": 0, "y": 0}
+        self._pending_port_node_select = False
         self._create_wire_data: dict[str, object] = {
             "start": None,
             "preview_id": None,
@@ -314,16 +315,12 @@ class DiagramApp:
             points = [(0, 0), (sw, indent), (sw, sh - indent), (0, sh)]
             draw.polygon(points, fill="white", outline="black", width=lw)
             n_label = kind.split("_")[1]
-            draw.text((sw * 0.4, sh * 0.38), "MUX", fill="black", font=_font(8, True), anchor="mm")
-            draw.text((sw * 0.4, sh * 0.62), n_label, fill="black", font=_font(7), anchor="mm")
 
         elif kind.startswith("DEMUX"):
             indent = int(sh * 0.2)
             points = [(0, indent), (sw, 0), (sw, sh), (0, sh - indent)]
             draw.polygon(points, fill="white", outline="black", width=lw)
             n_label = kind.split("_")[1]
-            draw.text((sw * 0.6, sh * 0.38), "DEMUX", fill="black", font=_font(7, True), anchor="mm")
-            draw.text((sw * 0.6, sh * 0.62), n_label, fill="black", font=_font(7), anchor="mm")
 
         elif kind == "DFF":
             draw.rectangle([0, 0, sw - 1, sh - 1], fill="white", outline="black", width=lw)
@@ -1651,6 +1648,9 @@ class DiagramApp:
         if self._selected_label_conn:
             self._open_label_dialog(self._selected_label_conn)
             return
+        if self._selected_wire and self._selected_wire.free_points:
+            self._open_wire_style_editor(self._selected_wire)
+            return
         self._open_edit_block()
 
     def _open_label_dialog(self, connection: Connection, is_new: bool = False):
@@ -2134,21 +2134,32 @@ class DiagramApp:
             return
         if self._mode in ("connect", "create_port", "delete_port"):
             self._reset_port_mode()
-        if not self._open_wire_style_dialog():
+        wire_style = self._open_wire_style_dialog(
+            "CREATE WIRE",
+            self._create_wire_data["color"],
+            self._create_wire_data["thickness"],
+        )
+        if not wire_style:
             return
+        self._create_wire_data["color"], self._create_wire_data["thickness"] = wire_style
         self._mode = "create_wire"
         self._create_wire_data["start"] = None
         self._clear_create_wire_preview()
 
-    def _open_wire_style_dialog(self) -> bool:
+    def _open_wire_style_dialog(
+        self,
+        title: str,
+        initial_color: str,
+        initial_thickness: float,
+    ) -> tuple[str, float] | None:
         dialog = tk.Toplevel(self.root)
-        dialog.title("CREATE WIRE")
+        dialog.title(title)
         dialog.resizable(False, False)
         dialog.grab_set()
 
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
         tk.Label(dialog, text="Color").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        color_name = self._color_to_name(self._create_wire_data["color"])
+        color_name = self._color_to_name(initial_color)
         if color_name not in color_options:
             color_name = "BLACK"
         color_var = tk.StringVar(value=color_name)
@@ -2157,7 +2168,7 @@ class DiagramApp:
 
         tk.Label(dialog, text="Thickness").grid(row=1, column=0, padx=6, pady=6, sticky="w")
         thickness_lookup = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
-        thickness_var = tk.StringVar(value=thickness_lookup.get(self._create_wire_data["thickness"], "Normal"))
+        thickness_var = tk.StringVar(value=thickness_lookup.get(initial_thickness, "Normal"))
         thickness_menu = tk.OptionMenu(dialog, thickness_var, "Thin", "Normal", "Thick")
         thickness_menu.grid(row=1, column=1, padx=6, pady=6, sticky="w")
 
@@ -2177,11 +2188,25 @@ class DiagramApp:
 
         dialog.wait_window()
         if not result["ok"]:
-            return False
+            return None
         thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
-        self._create_wire_data["color"] = self._color_to_hex(color_var.get())
-        self._create_wire_data["thickness"] = thickness_map.get(thickness_var.get(), 1.0)
-        return True
+        color = self._color_to_hex(color_var.get())
+        thickness = thickness_map.get(thickness_var.get(), 1.0)
+        return (color, thickness)
+
+    def _open_wire_style_editor(self, connection: Connection):
+        wire_style = self._open_wire_style_dialog(
+            "EDIT WIRE",
+            connection.line_color,
+            connection.line_thickness,
+        )
+        if not wire_style:
+            return
+        connection.line_color, connection.line_thickness = wire_style
+        if connection.line_id:
+            width = self._wire_selected_width(connection) if self._selected_wire is connection else self._wire_width(connection)
+            self.canvas.itemconfig(connection.line_id, fill=connection.line_color, width=width)
+        self._record_history()
 
     def _handle_create_wire_press(self, event):
         start = self._create_wire_data.get("start")
@@ -2477,13 +2502,14 @@ class DiagramApp:
         if self._mode == "create_port":
             self._reset_port_mode()
             return
-        if not self._active_node_name:
+        if not self._active_node_name and not self._selected_wire:
             return
         if self._mode in ("connect", "delete_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
         self._mode = "create_port"
+        self._pending_port_node_select = self._active_node_name is None
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
             for port in node.inputs + node.outputs:
@@ -2666,9 +2692,18 @@ class DiagramApp:
                 node.resize_enabled = False
                 node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
                 self._redraw_node(node)
+        self._pending_port_node_select = False
         self._mode = "normal"
 
     def _handle_create_port_click(self, event):
+        if not self._active_node_name and self._pending_port_node_select:
+            item = self.canvas.find_withtag("current")
+            if item:
+                tags = self.canvas.gettags(item[0])
+                node_tag = next((tag for tag in tags if tag.startswith("node:")), None)
+                if node_tag:
+                    self._active_node_name = node_tag.split(":", 1)[1]
+            self._pending_port_node_select = False
         if not self._active_node_name:
             return
         node = self.nodes.get(self._active_node_name)
