@@ -256,7 +256,7 @@ class DiagramApp:
         self.root.bind("<Control-s>", lambda _event: self._save_json())
         self.root.bind("<Control-z>", lambda _event: self._undo())
         self.root.bind("<Control-y>", lambda _event: self._redo())
-        self.root.bind("s", lambda _event: self._toggle_resize_active_node())
+        self.root.bind("s", lambda _event: self._handle_s_key())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("a", lambda _event: self._toggle_create_port_mode())
         self.root.bind("<Control-w>", lambda _event: self._toggle_create_wire_mode())
@@ -658,6 +658,9 @@ class DiagramApp:
         self._drag_data["y"] = event.y
 
     def _on_canvas_press(self, event):
+        if self._mode == "wire_port":
+            self._handle_wire_port_click(event)
+            return
         if self._mode == "create_wire":
             self._handle_create_wire_press(event)
             return
@@ -1189,6 +1192,30 @@ class DiagramApp:
         label_x, label_y = self._label_position(coords)
         self.canvas.coords(connection.label_id, label_x, label_y)
 
+    def _simplify_waypoints(self, connection: Connection):
+        if not connection.waypoints or not connection.src or not connection.dst:
+            return
+        src_id = self._get_port_canvas_id(connection.src[0], connection.src[1])
+        dst_id = self._get_port_canvas_id(connection.dst[0], connection.dst[1])
+        if not src_id or not dst_id:
+            return
+        src = self._port_center(src_id)
+        dst = self._port_center(dst_id)
+        points = [src] + connection.waypoints + [dst]
+        simplified = [points[0]]
+        for i in range(1, len(points) - 1):
+            prev = simplified[-1]
+            curr = points[i]
+            nxt = points[i + 1]
+            if (prev[0] == curr[0] == nxt[0]) or (prev[1] == curr[1] == nxt[1]):
+                continue
+            if curr == prev:
+                continue
+            simplified.append(curr)
+        if points[-1] != simplified[-1]:
+            simplified.append(points[-1])
+        connection.waypoints = list(simplified[1:-1])
+
     def _find_port(self, node_name: str, port_name: str, kind: str | None = None) -> tuple[Node, Port] | None:
         node = self.nodes.get(node_name)
         if not node:
@@ -1510,6 +1537,8 @@ class DiagramApp:
 
     def _on_wire_release(self, _event):
         if self._drag_wire["connection"]:
+            self._simplify_waypoints(self._drag_wire["connection"])
+            self._update_connections()
             self._record_history()
         self._drag_wire["connection"] = None
         self._drag_wire["mode"] = None
@@ -1560,6 +1589,7 @@ class DiagramApp:
             "create_port": "create port",
             "delete_port": "delete port",
             "create_wire": "create wire",
+            "wire_port": "wire port",
         }
         mode_text = mode_map.get(self._mode, self._mode)
         if self._delete_mode:
@@ -1635,6 +1665,8 @@ class DiagramApp:
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
+        if self._mode == "wire_port":
+            self._mode = "normal"
         if self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node and node.resize_enabled:
@@ -1652,6 +1684,19 @@ class DiagramApp:
             self._open_wire_style_editor(self._selected_wire)
             return
         self._open_edit_block()
+
+    def _handle_s_key(self):
+        if self._selected_wire and self._selected_wire.free_points:
+            if self._mode == "wire_port":
+                self._mode = "normal"
+                return
+            if self._mode in ("connect", "create_port", "delete_port"):
+                self._reset_port_mode()
+            if self._mode == "create_wire":
+                self._reset_create_wire_mode()
+            self._mode = "wire_port"
+            return
+        self._toggle_resize_active_node()
 
     def _open_label_dialog(self, connection: Connection, is_new: bool = False):
         dialog = tk.Toplevel(self.root)
@@ -1771,6 +1816,47 @@ class DiagramApp:
         if abs(py - y) > threshold:
             return False
         return min(x1, x2) - threshold <= px <= max(x1, x2) + threshold
+
+    @staticmethod
+    def _distance_squared(x1: float, y1: float, x2: float, y2: float) -> float:
+        return (x1 - x2) ** 2 + (y1 - y2) ** 2
+
+    @classmethod
+    def _nearest_point_on_segment(
+        cls,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        px: float,
+        py: float,
+    ) -> tuple[float, float]:
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            return (x1, y1)
+        t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        return (x1 + t * dx, y1 + t * dy)
+
+    @classmethod
+    def _nearest_point_on_polyline(
+        cls,
+        coords: list[float],
+        px: float,
+        py: float,
+    ) -> tuple[float, float]:
+        best_point = (coords[0], coords[1])
+        best_dist = float("inf")
+        for idx in range(0, len(coords) - 2, 2):
+            x1, y1 = coords[idx], coords[idx + 1]
+            x2, y2 = coords[idx + 2], coords[idx + 3]
+            cx, cy = cls._nearest_point_on_segment(x1, y1, x2, y2, px, py)
+            dist = cls._distance_squared(cx, cy, px, py)
+            if dist < best_dist:
+                best_dist = dist
+                best_point = (cx, cy)
+        return best_point
 
     @staticmethod
     def _orthogonal_segments(
@@ -2502,9 +2588,6 @@ class DiagramApp:
         if self._mode == "create_port":
             self._reset_port_mode()
             return
-        if self._selected_wire and self._selected_wire.free_points:
-            self._create_junction_on_wire(self._selected_wire)
-            return
         if not self._active_node_name and not self._selected_wire:
             return
         if self._mode in ("connect", "delete_port"):
@@ -2527,44 +2610,6 @@ class DiagramApp:
         else:
             self._mode = "normal"
 
-    def _create_junction_on_wire(self, connection: Connection):
-        if not connection.free_points:
-            return
-        mid_x, mid_y = self._free_wire_midpoint(connection.free_points)
-        name = self._unique_node_name("Junction")
-        size = 12
-        node = Node(
-            name=name,
-            kind="PORT",
-            inputs=[],
-            outputs=[],
-            x=int(mid_x - size / 2),
-            y=int(mid_y - size / 2),
-            width=size,
-            height=size,
-            base_height=size,
-            level=self._next_level(),
-            fill_color="white",
-            outline_color="black",
-            outline_enabled=True,
-            outline_style="solid",
-            outline_scale=1.0,
-            label_font_size=1,
-            label_font_family="Arial",
-            label_font_weight="normal",
-        )
-        ports = [
-            Port(name="left", kind="io", side="left", offset=0.5),
-            Port(name="right", kind="io", side="right", offset=0.5),
-            Port(name="top", kind="io", side="top", offset=0.5),
-            Port(name="bottom", kind="io", side="bottom", offset=0.5),
-        ]
-        node.inputs = ports
-        self.nodes[name] = node
-        self._draw_node(node)
-        self._apply_z_order(active_node_name=node.name)
-        self._record_history()
-
     def _unique_node_name(self, base: str) -> str:
         index = 1
         while True:
@@ -2572,14 +2617,6 @@ class DiagramApp:
             if candidate not in self.nodes:
                 return candidate
             index += 1
-
-    @staticmethod
-    def _free_wire_midpoint(points: list[tuple[float, float]]) -> tuple[float, float]:
-        if len(points) < 2:
-            return (0.0, 0.0)
-        x1, y1 = points[0]
-        x2, y2 = points[-1]
-        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
     def _toggle_delete_port_mode(self):
         if self._mode == "delete_port":
@@ -2777,6 +2814,52 @@ class DiagramApp:
         node.resize_enabled = False
         self._redraw_node(node)
         self._mode = "normal"
+        self._record_history()
+
+    def _handle_wire_port_click(self, event):
+        connection = self._selected_wire
+        if not connection or not connection.free_points:
+            self._mode = "normal"
+            return
+        coords = self._connection_line_coords(connection)
+        if not coords or len(coords) < 4:
+            self._mode = "normal"
+            return
+        px, py = self._nearest_point_on_polyline(coords, event.x, event.y)
+        if self._distance_squared(px, py, event.x, event.y) > (6.0 ** 2):
+            return
+        self._create_junction_at(px, py)
+        self._mode = "normal"
+
+    def _create_junction_at(self, x: float, y: float):
+        name = self._unique_node_name("Junction")
+        size = 12
+        node = Node(
+            name=name,
+            kind="PORT",
+            inputs=[],
+            outputs=[],
+            x=int(x),
+            y=int(y - size / 2),
+            width=size,
+            height=size,
+            base_height=size,
+            level=self._next_level(),
+            fill_color="white",
+            outline_color="black",
+            outline_enabled=True,
+            outline_style="solid",
+            outline_scale=1.0,
+            label_font_size=1,
+            label_font_family="Arial",
+            label_font_weight="normal",
+        )
+        port = Port(name="p1", kind="io", side="left", offset=0.5)
+        port.manual_y = y
+        node.inputs = [port]
+        self.nodes[name] = node
+        self._draw_node(node)
+        self._apply_z_order(active_node_name=node.name)
         self._record_history()
 
     def _handle_delete_port_click(self, event):
@@ -2986,6 +3069,8 @@ class DiagramApp:
                     conn_entry["line_color"] = self._color_to_name(connection.line_color)
                 if connection.line_thickness != 1.0:
                     conn_entry["line_thickness"] = connection.line_thickness
+                if not connection.show_arrow:
+                    conn_entry["show_arrow"] = False
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -3109,6 +3194,7 @@ class DiagramApp:
             "\n"
             "Tips\n"
             "- Hover a block/gate edge to highlight it, press S to resize (border turns yellow), click to finish.\n"
+            "- Select a free wire, press S, then click a point on the wire to place a junction port.\n"
             "- In CONNECT mode, click empty space to add orthogonal bends. Multiple bends supported.\n"
         )
         label = tk.Label(window, text=text, justify="left", bg="white", font=("Arial", 10))
@@ -3510,6 +3596,8 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             points = entry.get("points")
             if points:
                 connection.free_points = [(float(px), float(py)) for px, py in points]
+            if "show_arrow" in entry:
+                connection.show_arrow = bool(entry["show_arrow"])
             if "label_x" in entry and entry["label_x"] is not None:
                 connection.label_x = float(entry["label_x"])
             if "label_y" in entry and entry["label_y"] is not None:
