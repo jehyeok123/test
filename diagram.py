@@ -53,6 +53,8 @@ class Connection:
     line_id: int | None = None
     manual_mid_x: float | None = None
     manual_mid_y: float | None = None
+    line_color: str = "#333333"
+    line_thickness: float = 1.0
     label: str | None = None
     label_id: int | None = None
     label_font_family: str = "Arial"
@@ -62,6 +64,7 @@ class Connection:
     label_x: float | None = None
     label_y: float | None = None
     waypoints: list[tuple[float, float]] = field(default_factory=list)
+    free_points: list[tuple[float, float]] = field(default_factory=list)
     show_arrow: bool = True
 
 
@@ -150,8 +153,12 @@ class DiagramApp:
         self.connect_button.pack(side=tk.LEFT, padx=2)
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
         self.wire_name_button.pack(side=tk.LEFT, padx=2)
+        self.create_wire_button = ttk.Button(
+            self.toolbar_row1, text="CREATE WIRE (CTRL+W)", command=self._toggle_create_wire_mode, style="Tool.TButton"
+        )
+        self.create_wire_button.pack(side=tk.LEFT, padx=2)
 
-        self.resize_button = ttk.Button(self.toolbar_row2, text="BLOCK RESIZE (S)", command=self._toggle_resize_active_node, style="Tool.TButton")
+        self.resize_button = ttk.Button(self.toolbar_row2, text="RESIZE (S)", command=self._toggle_resize_active_node, style="Tool.TButton")
         self.resize_button.pack(side=tk.LEFT, padx=2)
         self.create_port_button = ttk.Button(self.toolbar_row2, text="CREATE PORT (A)", command=self._toggle_create_port_mode, style="Tool.TButton")
         self.create_port_button.pack(side=tk.LEFT, padx=2)
@@ -212,6 +219,12 @@ class DiagramApp:
         self._selected_label_conn: Connection | None = None
         self._selected_label_border: int | None = None
         self._label_drag_data: dict[str, object] = {"connection": None, "x": 0, "y": 0}
+        self._create_wire_data: dict[str, object] = {
+            "start": None,
+            "preview_id": None,
+            "color": "#333333",
+            "thickness": 1.0,
+        }
         self._build_ui()
 
     def _build_ui(self):
@@ -245,6 +258,7 @@ class DiagramApp:
         self.root.bind("s", lambda _event: self._toggle_resize_active_node())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("a", lambda _event: self._toggle_create_port_mode())
+        self.root.bind("<Control-w>", lambda _event: self._toggle_create_wire_mode())
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_motion)
         self.canvas.bind("<ButtonRelease-2>", self._on_pan_release)
@@ -460,6 +474,17 @@ class DiagramApp:
                     fill="white", outline="black", width=lw,
                 )
                 node.items.append(rect)
+        if node.resize_enabled:
+            outline_width = max(2, int(round(2 * node.outline_scale)))
+            outline_rect = self.canvas.create_rectangle(
+                x1,
+                y1,
+                x1 + w,
+                y1 + h,
+                outline="black",
+                width=outline_width,
+            )
+            node.items.append(outline_rect)
 
     def _draw_node(self, node: Node):
         x1, y1 = node.x, node.y
@@ -526,8 +551,8 @@ class DiagramApp:
             *coords,
             smooth=False,
             arrow=tk.LAST if connection.show_arrow else tk.NONE,
-            width=2,
-            fill="#333333",
+            width=self._wire_width(connection),
+            fill=connection.line_color,
         )
         self.canvas.addtag_withtag("wire", line)
         connection.line_id = line
@@ -547,6 +572,15 @@ class DiagramApp:
             )
             self.canvas.addtag_withtag("label", label_id)
             connection.label_id = label_id
+
+    @staticmethod
+    def _wire_width(connection: Connection) -> int:
+        return max(1, int(round(connection.line_thickness * 2)))
+
+    @staticmethod
+    def _wire_selected_width(connection: Connection) -> int:
+        base = DiagramApp._wire_width(connection)
+        return max(base + 2, int(round(base * 1.5)))
 
     def _get_port_canvas_id(self, node_name: str, port_name: str, kind: str | None = None) -> int | None:
         node = self.nodes.get(node_name)
@@ -627,6 +661,9 @@ class DiagramApp:
         self._drag_data["y"] = event.y
 
     def _on_canvas_press(self, event):
+        if self._mode == "create_wire":
+            self._handle_create_wire_press(event)
+            return
         if self._mode != "connect":
             item = self.canvas.find_withtag("current")
             if item:
@@ -661,6 +698,9 @@ class DiagramApp:
         self._update_wire_preview(event.x, event.y)
 
     def _on_canvas_motion(self, event):
+        if self._mode == "create_wire":
+            self._update_create_wire_preview(event.x, event.y)
+            return
         if self._mode == "connect" and len(self._selected_ports) == 1:
             self._update_wire_preview(event.x, event.y)
 
@@ -1078,6 +1118,9 @@ class DiagramApp:
         return self._connection_orientation(connection) == "orthogonal"
 
     def _connection_line_coords(self, connection: Connection) -> list[float] | None:
+        if connection.free_points:
+            coords = [c for point in connection.free_points for c in point]
+            return coords if len(coords) >= 4 else None
         if connection.src and connection.dst:
             src_node, src_port = connection.src
             dst_node, dst_port = connection.dst
@@ -1181,7 +1224,7 @@ class DiagramApp:
             return
         self._deselect_wire()
         self._selected_wire = connection
-        self.canvas.itemconfigure(line_id, width=4)
+        self.canvas.itemconfigure(line_id, width=self._wire_selected_width(connection))
         coords = self._connection_line_coords(connection)
         if not coords:
             return
@@ -1498,7 +1541,9 @@ class DiagramApp:
 
     def _deselect_wire(self):
         if self._selected_wire and self._selected_wire.line_id:
-            self.canvas.itemconfigure(self._selected_wire.line_id, width=2)
+            self.canvas.itemconfigure(
+                self._selected_wire.line_id, width=self._wire_width(self._selected_wire)
+            )
         self._selected_wire = None
 
     def _deselect_label(self):
@@ -1517,6 +1562,7 @@ class DiagramApp:
             "connect": "connect",
             "create_port": "create port",
             "delete_port": "delete port",
+            "create_wire": "create wire",
         }
         mode_text = mode_map.get(self._mode, self._mode)
         if self._delete_mode:
@@ -1590,6 +1636,8 @@ class DiagramApp:
             return
         if self._mode in ("connect", "create_port", "delete_port"):
             self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
         if self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node and node.resize_enabled:
@@ -2064,6 +2112,8 @@ class DiagramApp:
             return
         if self._mode in ("create_port", "delete_port"):
             self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
         self._mode = "connect"
         self._selected_ports = []
         self._pending_midpoints = []
@@ -2077,6 +2127,130 @@ class DiagramApp:
         self._clear_wire_preview()
         self._set_all_port_colors("black")
         self._mode = "normal"
+
+    def _toggle_create_wire_mode(self):
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
+            return
+        if self._mode in ("connect", "create_port", "delete_port"):
+            self._reset_port_mode()
+        if not self._open_wire_style_dialog():
+            return
+        self._mode = "create_wire"
+        self._create_wire_data["start"] = None
+        self._clear_create_wire_preview()
+
+    def _open_wire_style_dialog(self) -> bool:
+        dialog = tk.Toplevel(self.root)
+        dialog.title("CREATE WIRE")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        color_options = list(self.COLOR_NAME_TO_HEX.keys())
+        tk.Label(dialog, text="Color").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        color_name = self._color_to_name(self._create_wire_data["color"])
+        if color_name not in color_options:
+            color_name = "BLACK"
+        color_var = tk.StringVar(value=color_name)
+        color_menu = tk.OptionMenu(dialog, color_var, *color_options)
+        color_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+
+        tk.Label(dialog, text="Thickness").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        thickness_lookup = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
+        thickness_var = tk.StringVar(value=thickness_lookup.get(self._create_wire_data["thickness"], "Normal"))
+        thickness_menu = tk.OptionMenu(dialog, thickness_var, "Thin", "Normal", "Thick")
+        thickness_menu.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+
+        result = {"ok": False}
+
+        def on_ok(_event=None):
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel(_event=None):
+            dialog.destroy()
+
+        dialog.bind("<Escape>", on_cancel)
+        dialog.bind("<Return>", on_ok)
+        tk.Button(dialog, text="OK", width=8, command=on_ok).grid(row=2, column=0, padx=6, pady=8)
+        tk.Button(dialog, text="Cancel", width=8, command=on_cancel).grid(row=2, column=1, padx=6, pady=8)
+
+        dialog.wait_window()
+        if not result["ok"]:
+            return False
+        thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
+        self._create_wire_data["color"] = self._color_to_hex(color_var.get())
+        self._create_wire_data["thickness"] = thickness_map.get(thickness_var.get(), 1.0)
+        return True
+
+    def _handle_create_wire_press(self, event):
+        start = self._create_wire_data.get("start")
+        if start is None:
+            start_x = self._snap_value(event.x)
+            start_y = self._snap_value(event.y)
+            self._create_wire_data["start"] = (start_x, start_y)
+            self._update_create_wire_preview(event.x, event.y)
+            return
+        start_x, start_y = start
+        end_x, end_y = self._constrain_wire_end(start_x, start_y, event.x, event.y)
+        if (start_x, start_y) == (end_x, end_y):
+            return
+        connection = Connection(src=None, dst=None)
+        connection.free_points = [(start_x, start_y), (end_x, end_y)]
+        connection.line_color = self._create_wire_data["color"]
+        connection.line_thickness = self._create_wire_data["thickness"]
+        connection.show_arrow = False
+        self.connections.append(connection)
+        self._draw_connection(connection)
+        self._record_history()
+        self._create_wire_data["start"] = None
+        self._clear_create_wire_preview()
+
+    def _update_create_wire_preview(self, x: float, y: float):
+        start = self._create_wire_data.get("start")
+        if start is None:
+            self._clear_create_wire_preview()
+            return
+        start_x, start_y = start
+        end_x, end_y = self._constrain_wire_end(start_x, start_y, x, y)
+        coords = [start_x, start_y, end_x, end_y]
+        preview_id = self._create_wire_data.get("preview_id")
+        width = max(1, int(round(self._create_wire_data["thickness"] * 2)))
+        if preview_id is None:
+            preview_id = self.canvas.create_line(*coords, width=width, fill="#999999")
+            self._create_wire_data["preview_id"] = preview_id
+        else:
+            self.canvas.coords(preview_id, *coords)
+
+    def _clear_create_wire_preview(self):
+        preview_id = self._create_wire_data.get("preview_id")
+        if preview_id:
+            self.canvas.delete(preview_id)
+        self._create_wire_data["preview_id"] = None
+
+    def _reset_create_wire_mode(self):
+        self._create_wire_data["start"] = None
+        self._clear_create_wire_preview()
+        self._mode = "normal"
+
+    def _constrain_wire_end(self, start_x: int, start_y: int, raw_x: float, raw_y: float) -> tuple[int, int]:
+        end_x = self._snap_value(raw_x)
+        end_y = self._snap_value(raw_y)
+        dx = end_x - start_x
+        dy = end_y - start_y
+        if dx == 0 and dy == 0:
+            return end_x, end_y
+        abs_dx = abs(dx)
+        abs_dy = abs(dy)
+        if abs_dx >= abs_dy * 2:
+            return end_x, start_y
+        if abs_dy >= abs_dx * 2:
+            return start_x, end_y
+        length = max(abs_dx, abs_dy)
+        return (
+            start_x + (length if dx >= 0 else -length),
+            start_y + (length if dy >= 0 else -length),
+        )
 
 
     def _current_wire_direction(self) -> str:
@@ -2126,6 +2300,8 @@ class DiagramApp:
             return
         if self._mode in ("connect", "create_port", "delete_port"):
             self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
         self._delete_mode = True
         self._delete_blink_on = False
         self._capture_delete_colors()
@@ -2228,11 +2404,13 @@ class DiagramApp:
         for connection in self.connections:
             if connection.line_id:
                 self.canvas.itemconfig(connection.line_id, fill=color)
+            connection.line_color = color
 
     def _set_all_wire_widths(self, width: int):
         for connection in self.connections:
             if connection.line_id:
                 self.canvas.itemconfig(connection.line_id, width=width)
+            connection.line_thickness = max(0.5, width / 2)
 
     def _remove_active_node(self):
         if not self._active_node_name:
@@ -2303,6 +2481,8 @@ class DiagramApp:
             return
         if self._mode in ("connect", "delete_port"):
             self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
         self._mode = "create_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
@@ -2326,6 +2506,8 @@ class DiagramApp:
             return
         if self._mode in ("connect", "create_port"):
             self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
         self._mode = "delete_port"
         node = self.nodes.get(self._active_node_name)
         if node and node.kind == "BLOCK":
@@ -2581,6 +2763,8 @@ class DiagramApp:
                 connection.manual_mid_y *= factor
             if connection.waypoints:
                 connection.waypoints = [(wx * factor, wy * factor) for wx, wy in connection.waypoints]
+            if connection.free_points:
+                connection.free_points = [(px * factor, py * factor) for px, py in connection.free_points]
             if connection.label_x is not None:
                 connection.label_x *= factor
             if connection.label_y is not None:
@@ -2632,6 +2816,12 @@ class DiagramApp:
                 conn.manual_mid_y += dy
             if conn.waypoints:
                 conn.waypoints = [(wx + dx, wy + dy) for wx, wy in conn.waypoints]
+            if conn.free_points:
+                conn.free_points = [(px + dx, py + dy) for px, py in conn.free_points]
+            if conn.label_x is not None:
+                conn.label_x += dx
+            if conn.label_y is not None:
+                conn.label_y += dy
 
     def _on_pan_release(self, _event):
         if self._pan_data["active"]:
@@ -2686,6 +2876,8 @@ class DiagramApp:
                 "label": connection.label,
             }
             if not connection.src and not connection.dst:
+                if connection.free_points:
+                    conn_entry["points"] = [(_unscale(px), _unscale(py)) for px, py in connection.free_points]
                 if connection.label_x is not None:
                     conn_entry["label_x"] = _unscale(connection.label_x)
                 if connection.label_y is not None:
@@ -2698,6 +2890,10 @@ class DiagramApp:
                     conn_entry["label_font_weight"] = connection.label_font_weight
                 if connection.label_angle:
                     conn_entry["label_angle"] = connection.label_angle
+                if connection.line_color != "#333333":
+                    conn_entry["line_color"] = self._color_to_name(connection.line_color)
+                if connection.line_thickness != 1.0:
+                    conn_entry["line_thickness"] = connection.line_thickness
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -2709,6 +2905,10 @@ class DiagramApp:
             }
             if connection.waypoints:
                 wire_data["waypoints"] = [(_unscale(wx), _unscale(wy)) for wx, wy in connection.waypoints]
+            if connection.line_color != "#333333":
+                wire_data["line_color"] = self._color_to_name(connection.line_color)
+            if connection.line_thickness != 1.0:
+                wire_data["line_thickness"] = connection.line_thickness
             if connection.label_font_family != "Arial":
                 wire_data["label_font_family"] = connection.label_font_family
             if connection.label_font_size != 12:
@@ -2763,6 +2963,8 @@ class DiagramApp:
         self._active_node_name = None
         self._outline_backup.clear()
         self._clear_wire_preview()
+        self._clear_create_wire_preview()
+        self._create_wire_data["start"] = None
         self._selected_wire = None
         self._selected_label_conn = None
         self._selected_label_border = None
@@ -2803,6 +3005,7 @@ class DiagramApp:
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
             "- DISCONNECT: click a wire to remove it.\n"
             "- LABEL (L): click a wire to add/edit a label.\n"
+            "- CREATE WIRE (Ctrl+W): draw a straight wire by clicking two points.\n"
             "- CREATE PORT (A): add a port on the selected block edge.\n"
             "- DELETE PORT (Ctrl+A): remove a port on the selected block.\n"
             "- SHOW/HIDE PORT (`): toggle port visibility.\n"
@@ -3207,7 +3410,14 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             manual_mid_x=entry.get("manual_mid_x"),
             manual_mid_y=entry.get("manual_mid_y"),
         )
+        if "line_color" in entry and entry["line_color"] is not None:
+            connection.line_color = DiagramApp._color_to_hex(str(entry["line_color"]))
+        if "line_thickness" in entry and entry["line_thickness"] is not None:
+            connection.line_thickness = float(entry["line_thickness"])
         if not src and not dst:
+            points = entry.get("points")
+            if points:
+                connection.free_points = [(float(px), float(py)) for px, py in points]
             if "label_x" in entry and entry["label_x"] is not None:
                 connection.label_x = float(entry["label_x"])
             if "label_y" in entry and entry["label_y"] is not None:
@@ -3237,6 +3447,10 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                     waypoints = wire.get("waypoints")
                     if waypoints:
                         connection.waypoints = [(float(wp[0]), float(wp[1])) for wp in waypoints]
+                    if "line_color" in wire and wire["line_color"] is not None:
+                        connection.line_color = DiagramApp._color_to_hex(str(wire["line_color"]))
+                    if "line_thickness" in wire and wire["line_thickness"] is not None:
+                        connection.line_thickness = float(wire["line_thickness"])
                     if "label_font_family" in wire:
                         connection.label_font_family = str(wire["label_font_family"])
                     if "label_font_size" in wire:
