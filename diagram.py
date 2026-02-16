@@ -230,9 +230,11 @@ class DiagramApp:
         self._clipboard: dict[str, object] | None = None
         self._align_guides: list[int] = []
         self._align_threshold = 8
+        self._grid_items: list[int] = []
         self._build_ui()
 
     def _build_ui(self):
+        self._draw_grid()
         for node in self.nodes.values():
             self._draw_node(node)
         for connection in self.connections:
@@ -279,6 +281,41 @@ class DiagramApp:
         self.root.after(300, lambda: self.save_diagram(self.output_path))
         self._record_history(initial=True)
         self._schedule_status_update()
+
+    GRID_SPACING = 20
+
+    def _draw_grid(self):
+        self._clear_grid()
+        if not self._show_ports:
+            return
+        canvas_w = max(self.canvas.winfo_width(), 1200)
+        canvas_h = max(self.canvas.winfo_height(), 800)
+        bbox = self.canvas.bbox("all")
+        if bbox:
+            x_start = min(int(bbox[0]), 0) - 200
+            y_start = min(int(bbox[1]), 0) - 200
+            x_end = max(int(bbox[2]), canvas_w) + 200
+            y_end = max(int(bbox[3]), canvas_h) + 200
+        else:
+            x_start, y_start = -200, -200
+            x_end = canvas_w + 200
+            y_end = canvas_h + 200
+        step = self.GRID_SPACING
+        x_start = (x_start // step) * step
+        y_start = (y_start // step) * step
+        color = "#d0d0d0"
+        for x in range(x_start, x_end + 1, step):
+            gid = self.canvas.create_line(x, y_start, x, y_end, fill=color, width=1, tags="grid")
+            self._grid_items.append(gid)
+        for y in range(y_start, y_end + 1, step):
+            gid = self.canvas.create_line(x_start, y, x_end, y, fill=color, width=1, tags="grid")
+            self._grid_items.append(gid)
+        self.canvas.tag_lower("grid")
+
+    def _clear_grid(self):
+        for gid in self._grid_items:
+            self.canvas.delete(gid)
+        self._grid_items.clear()
 
     _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF",
                           "AND2", "AND4", "OR2", "OR4", "XOR2", "XOR4", "INV")
@@ -2827,6 +2864,7 @@ class DiagramApp:
 
     def _toggle_ports(self):
         self._show_ports = not self._show_ports
+        self._draw_grid()
         for node in self.nodes.values():
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, port.color)
@@ -3219,6 +3257,7 @@ class DiagramApp:
                 connection.label_x *= factor
             if connection.label_y is not None:
                 connection.label_y *= factor
+        self._draw_grid()
         for node in self.nodes.values():
             self._redraw_node(node)
         self._update_connections()
@@ -3275,6 +3314,7 @@ class DiagramApp:
 
     def _on_pan_release(self, _event):
         if self._pan_data["active"]:
+            self._draw_grid()
             self._record_history()
         self._pan_data["active"] = False
 
@@ -3409,6 +3449,7 @@ class DiagramApp:
         self.nodes, self.connections = parse_data(payload)
         self._zoom_scale = float(state.get("zoom_scale", 1.0))
         self.canvas.delete("all")
+        self._grid_items.clear()
         self._port_items.clear()
         self._selected_ports = []
         self._pending_midpoints = []
@@ -3421,6 +3462,7 @@ class DiagramApp:
         self._selected_label_conn = None
         self._selected_label_border = None
         self._mode = "normal"
+        self._draw_grid()
         for node in self.nodes.values():
             self._draw_node(node)
         for connection in self.connections:
@@ -3555,12 +3597,30 @@ class DiagramApp:
             "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 50},
         }
 
+    def _content_bbox(self):
+        all_ids = self.canvas.find_all()
+        content_ids = [i for i in all_ids if "grid" not in self.canvas.gettags(i)]
+        if not content_ids:
+            return None
+        x1 = y1 = float("inf")
+        x2 = y2 = float("-inf")
+        for cid in content_ids:
+            b = self.canvas.bbox(cid)
+            if b:
+                x1 = min(x1, b[0])
+                y1 = min(y1, b[1])
+                x2 = max(x2, b[2])
+                y2 = max(y2, b[3])
+        if x1 == float("inf"):
+            return None
+        return (x1, y1, x2, y2)
+
     def save_diagram(self, path: Path):
         self.root.update()
         try:
             from PIL import Image, ImageDraw, ImageFont
 
-            bbox = self.canvas.bbox("all")
+            bbox = self._content_bbox()
             if not bbox:
                 return
             margin = 30
@@ -3586,6 +3646,9 @@ class DiagramApp:
             }
 
             for item_id in self.canvas.find_all():
+                tags = self.canvas.gettags(item_id)
+                if "grid" in tags:
+                    continue
                 item_type = self.canvas.type(item_id)
                 coords = self.canvas.coords(item_id)
                 if not coords:
