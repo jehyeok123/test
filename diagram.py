@@ -370,7 +370,7 @@ class DiagramApp:
             tri_y = int(sh * 0.67)
             tri_s = 12 * scale
             tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
-            draw.polygon(tri_points, fill="white", outline="black", width=max(1, scale))
+            draw.polygon(tri_points, fill="white", outline="black", width=lw)
 
         elif kind.startswith("AND"):
             import math
@@ -392,85 +392,80 @@ class DiagramApp:
 
         elif kind.startswith("OR"):
             import math
-            # OR gate: curved input side + two smooth curves meeting at output tip
             n_curve = 80
-            body_pts = []
             curve_depth = sw * 0.15
-            # Left input curve (concave rightward)
+            # Build outline path: top-left → top curve → tip → bottom curve → bottom-left → left curve back to top-left
+            outline = []
+            # Top curve: from top-left (0,0) to tip (sw, sh/2)
+            tip_x, tip_y = sw, sh * 0.5
             for i in range(n_curve + 1):
                 t = i / n_curve
-                y = t * sh
-                x = curve_depth * math.sin(t * math.pi)
-                body_pts.append((x, y))
-            # Bottom curve: from bottom-left to output tip using cubic bezier
-            bx0, by0 = body_pts[-1]
-            tip_x, tip_y = sw, sh * 0.5
+                cp1x, cp1y = sw * 0.35, 0
+                cp2x, cp2y = sw * 0.8, sh * 0.15
+                x = (1-t)**3*0 + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tip_x
+                y = (1-t)**3*0 + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*tip_y
+                outline.append((x, y))
+            # Bottom curve: from tip back to bottom-left (0, sh)
             for i in range(1, n_curve + 1):
                 t = i / n_curve
-                # Cubic bezier: P0=bottom-left, P1=control1, P2=control2, P3=tip
-                cp1x, cp1y = sw * 0.3, sh * 1.0
-                cp2x, cp2y = sw * 0.8, sh * 0.75
-                x = (1-t)**3*bx0 + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tip_x
-                y = (1-t)**3*by0 + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*tip_y
-                body_pts.append((x, y))
-            # Top curve: from output tip back to top-left using cubic bezier
-            tx0, ty0 = body_pts[0]
-            for i in range(n_curve - 1, 0, -1):
+                cp1x, cp1y = sw * 0.8, sh * 0.85
+                cp2x, cp2y = sw * 0.35, sh
+                x = (1-t)**3*tip_x + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*0
+                y = (1-t)**3*tip_y + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*sh
+                outline.append((x, y))
+            # Left concave curve: from bottom-left (0, sh) back to top-left (0, 0)
+            for i in range(1, n_curve + 1):
                 t = i / n_curve
-                cp1x, cp1y = sw * 0.8, sh * 0.25
-                cp2x, cp2y = sw * 0.3, sh * 0.0
-                x = (1-t)**3*tip_x + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tx0
-                y = (1-t)**3*tip_y + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*ty0
-                body_pts.append((x, y))
-            draw.polygon(body_pts, fill="white", outline="black", width=lw)
+                y = sh * (1 - t)
+                x = curve_depth * math.sin((1 - t) * math.pi)
+                outline.append((x, y))
+            draw.polygon(outline, fill="white", outline="black", width=lw)
 
         elif kind.startswith("XOR"):
             import math
-            # XOR gate: same as OR but with extra curved line on input side
             n_curve = 80
             curve_depth = sw * 0.15
             xor_gap = sw * 0.10
-            body_pts = []
-            # Input curve (left side, concave rightward) - shifted right by xor_gap
+            tip_x, tip_y = sw, sh * 0.5
+            # Build body outline (same as OR but left curve shifted right by xor_gap)
+            outline = []
+            # Top curve: from top-left (xor_gap, 0) to tip
             for i in range(n_curve + 1):
                 t = i / n_curve
-                y = t * sh
-                x = xor_gap + curve_depth * math.sin(t * math.pi)
-                body_pts.append((x, y))
-            # Bottom curve: from bottom-left to output tip using cubic bezier
-            bx0, by0 = body_pts[-1]
-            tip_x, tip_y = sw, sh * 0.5
+                cp1x, cp1y = sw * 0.35, 0
+                cp2x, cp2y = sw * 0.8, sh * 0.15
+                x = (1-t)**3*xor_gap + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tip_x
+                y = (1-t)**3*0 + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*tip_y
+                outline.append((x, y))
+            # Bottom curve: from tip back to bottom-left (xor_gap, sh)
             for i in range(1, n_curve + 1):
                 t = i / n_curve
-                cp1x, cp1y = sw * 0.3, sh * 1.0
-                cp2x, cp2y = sw * 0.8, sh * 0.75
-                x = (1-t)**3*bx0 + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tip_x
-                y = (1-t)**3*by0 + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*tip_y
-                body_pts.append((x, y))
-            # Top curve: from output tip back to top-left using cubic bezier
-            tx0, ty0 = body_pts[0]
-            for i in range(n_curve - 1, 0, -1):
+                cp1x, cp1y = sw * 0.8, sh * 0.85
+                cp2x, cp2y = sw * 0.35, sh
+                x = (1-t)**3*tip_x + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*xor_gap
+                y = (1-t)**3*tip_y + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*sh
+                outline.append((x, y))
+            # Left concave curve of body: from (xor_gap, sh) to (xor_gap, 0)
+            for i in range(1, n_curve + 1):
                 t = i / n_curve
-                cp1x, cp1y = sw * 0.8, sh * 0.25
-                cp2x, cp2y = sw * 0.3, sh * 0.0
-                x = (1-t)**3*tip_x + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*tx0
-                y = (1-t)**3*tip_y + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*ty0
-                body_pts.append((x, y))
-            draw.polygon(body_pts, fill="white", outline="black", width=lw)
-            # Extra input curve (the distinguishing XOR line)
-            extra_pts = []
-            for i in range(n_curve + 1):
-                t = i / n_curve
-                y = t * sh
-                x = curve_depth * math.sin(t * math.pi)
-                extra_pts.append((x, y))
-            for i in range(len(extra_pts) - 1):
-                draw.line([extra_pts[i], extra_pts[i + 1]], fill="black", width=lw)
+                y = sh * (1 - t)
+                x = xor_gap + curve_depth * math.sin((1 - t) * math.pi)
+                outline.append((x, y))
+            draw.polygon(outline, fill="white", outline="black", width=lw)
+            # Extra XOR input curve (separate, to the left of the body)
+            for i in range(n_curve):
+                t0 = i / n_curve
+                t1 = (i + 1) / n_curve
+                y0 = t0 * sh
+                x0 = curve_depth * math.sin(t0 * math.pi)
+                y1 = t1 * sh
+                x1 = curve_depth * math.sin(t1 * math.pi)
+                draw.line([(x0, y0), (x1, y1)], fill="black", width=lw)
 
         elif kind == "INV":
             import math
             # INV gate: triangle pointing right + bubble at output
-            bubble_r = max(int(sw * 0.08), lw + 1)
+            bubble_r = max(int(sw * 0.10), lw + 2)
             tri_right = sw - bubble_r * 2 - lw
             margin_y = int(sh * 0.08)
             tri_pts = [(lw, margin_y), (tri_right, sh // 2), (lw, sh - margin_y)]
@@ -897,16 +892,35 @@ class DiagramApp:
             new_height = self._snap_value(new_height, min_height)
             node.y = orig_y + (orig_height - new_height)
             node.height = new_height
-            for port, prev in old_port_positions:
-                if port.side in ("left", "right"):
-                    port.manual_y = prev[1]
+            if node.kind == "BLOCK":
+                for port, prev in old_port_positions:
+                    if port.side in ("left", "right"):
+                        port.manual_y = prev[1]
+            else:
+                self._reposition_gate_ports(node)
         elif mode == "bottom":
             node.height = self._snap_value(max(min_height, orig_height + dy), min_height)
-            for port, prev in old_port_positions:
-                if port.side in ("left", "right"):
-                    port.manual_y = prev[1]
+            if node.kind == "BLOCK":
+                for port, prev in old_port_positions:
+                    if port.side in ("left", "right"):
+                        port.manual_y = prev[1]
+            else:
+                self._reposition_gate_ports(node)
         self._redraw_node(node)
         self._update_connections()
+        self._draw_alignment_guides(node)
+
+    def _reposition_gate_ports(self, node: Node):
+        n_in = len(node.inputs)
+        for idx, port in enumerate(node.inputs):
+            port.offset = (idx + 1) / (n_in + 1)
+            if port.side in ("left", "right"):
+                port.manual_y = node.y + port.offset * node.height
+        n_out = len(node.outputs)
+        for idx, port in enumerate(node.outputs):
+            port.offset = (idx + 1) / (n_out + 1)
+            if port.side in ("left", "right"):
+                port.manual_y = node.y + port.offset * node.height
 
     def _resize_gate(self, node: Node, mode: str, orig: tuple, event):
         base_image = self._gate_base_image(node.kind)
@@ -963,12 +977,11 @@ class DiagramApp:
             node.x = orig_right - node.width
             node.y = orig_y
         if mode in ("top", "bottom"):
-            for port, prev in old_port_positions:
-                if port.side in ("left", "right"):
-                    port.manual_y = prev[1]
+            self._reposition_gate_ports(node)
         self._clamp_ports_to_node(node)
         self._redraw_node(node)
         self._update_connections()
+        self._draw_alignment_guides(node)
 
     def _on_resize_release(self, _event):
         if self._resize_data["node"]:
@@ -976,6 +989,7 @@ class DiagramApp:
         self._resize_data["node"] = None
         self._resize_data["mode"] = None
         self._resize_data["orig"] = None
+        self._clear_alignment_guides()
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
 
@@ -1540,6 +1554,7 @@ class DiagramApp:
         if mode == "mid":
             raw_mid = event.x - self._drag_wire["offset"]
             connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
+            self._draw_point_alignment_guides(connection.manual_mid_x, event.y)
             if not connection.src or not connection.dst:
                 return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
@@ -1554,6 +1569,7 @@ class DiagramApp:
         if mode == "mid_y":
             raw_mid = event.y - self._drag_wire["offset"]
             connection.manual_mid_y = self._snap_to_step(raw_mid, self.MID_STEP)
+            self._draw_point_alignment_guides(event.x, connection.manual_mid_y)
             if not connection.src or not connection.dst:
                 return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
@@ -1593,10 +1609,14 @@ class DiagramApp:
                 new_y = self._snap_to_step(event.y - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (points[seg_idx][0], new_y)
                 points[seg_idx + 1] = (points[seg_idx + 1][0], new_y)
+                mid_x = (points[seg_idx][0] + points[seg_idx + 1][0]) / 2
+                self._draw_point_alignment_guides(mid_x, new_y)
             else:
                 new_x = self._snap_to_step(event.x - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (new_x, points[seg_idx][1])
                 points[seg_idx + 1] = (new_x, points[seg_idx + 1][1])
+                mid_y = (points[seg_idx][1] + points[seg_idx + 1][1]) / 2
+                self._draw_point_alignment_guides(new_x, mid_y)
             connection.waypoints = list(points[1:-1])
             coords = [c for p in points for c in p]
             self.canvas.coords(connection.line_id, *coords)
@@ -1616,6 +1636,7 @@ class DiagramApp:
         self._drag_wire.pop("seg_index", None)
         self._drag_wire.pop("points", None)
         self._drag_wire.pop("seg_dir", None)
+        self._clear_alignment_guides()
 
     def _on_wire_double_click(self, event):
         if self._mode != "normal":
@@ -1798,6 +1819,34 @@ class DiagramApp:
                             fill=guide_color, dash=(4, 4), width=1,
                         )
                         self._align_guides.append(gid)
+
+    def _draw_point_alignment_guides(self, px: float, py: float):
+        self._clear_alignment_guides()
+        threshold = self._align_threshold
+        guide_color = "#4A90D9"
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        drawn_x = set()
+        drawn_y = set()
+        for node in self.nodes.values():
+            ref_xs = [node.x, node.x + node.width / 2, node.x + node.width]
+            ref_ys = [node.y, node.y + node.height / 2, node.y + node.height]
+            for rx in ref_xs:
+                if abs(px - rx) < threshold and rx not in drawn_x:
+                    drawn_x.add(rx)
+                    gid = self.canvas.create_line(
+                        rx, 0, rx, canvas_h,
+                        fill=guide_color, dash=(4, 4), width=1,
+                    )
+                    self._align_guides.append(gid)
+            for ry in ref_ys:
+                if abs(py - ry) < threshold and ry not in drawn_y:
+                    drawn_y.add(ry)
+                    gid = self.canvas.create_line(
+                        0, ry, canvas_w, ry,
+                        fill=guide_color, dash=(4, 4), width=1,
+                    )
+                    self._align_guides.append(gid)
 
     def _handle_escape(self):
         if self._delete_mode:
@@ -3229,7 +3278,7 @@ class DiagramApp:
         for node in self.nodes.values():
             node.x *= factor
             node.y *= factor
-            if node.kind == "BLOCK":
+            if node.kind == "BLOCK" or node.kind in self._CUSTOM_GATE_KINDS:
                 node.width *= factor
                 node.height *= factor
                 node.base_height *= factor
