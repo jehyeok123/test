@@ -245,6 +245,12 @@ class DiagramApp:
         self._grid_items: list[int] = []
         self._build_ui()
 
+    def _cx(self, event):
+        return int(self.canvas.canvasx(event.x))
+
+    def _cy(self, event):
+        return int(self.canvas.canvasy(event.y))
+
     def _build_ui(self):
         self._draw_grid()
         for node in self.nodes.values():
@@ -303,12 +309,19 @@ class DiagramApp:
             return
         cw = self.canvas.winfo_width() or 1200
         ch = self.canvas.winfo_height() or 800
-        margin = 100
+        margin = 200
         x1 = min(bbox[0] - margin, 0)
         y1 = min(bbox[1] - margin, 0)
         x2 = max(bbox[2] + margin, cw)
         y2 = max(bbox[3] + margin, ch)
         self.canvas.configure(scrollregion=(x1, y1, x2, y2))
+        sr_w = x2 - x1
+        sr_h = y2 - y1
+        if sr_w > 0 and sr_h > 0:
+            target_x = (0 - x1) / sr_w
+            target_y = (0 - y1) / sr_h
+            self.canvas.xview_moveto(target_x)
+            self.canvas.yview_moveto(target_y)
 
     def _draw_grid(self):
         self._clear_grid()
@@ -702,13 +715,14 @@ class DiagramApp:
         node = self.nodes[node_name]
         self._active_node_name = node.name
         self._apply_z_order(active_node_name=node.name)
+        cx, cy = self._cx(event), self._cy(event)
         if node.resize_enabled:
-            resize_mode = self._hit_test_edge(node, event.x, event.y)
+            resize_mode = self._hit_test_edge(node, cx, cy)
             if resize_mode:
                 self._resize_data["node"] = node
                 self._resize_data["mode"] = resize_mode
-                self._resize_data["x"] = event.x
-                self._resize_data["y"] = event.y
+                self._resize_data["x"] = cx
+                self._resize_data["y"] = cy
                 if node.kind == "BLOCK" or node.kind in self._CUSTOM_GATE_KINDS:
                     self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
                 else:
@@ -722,17 +736,17 @@ class DiagramApp:
                 self.canvas.bind("<B1-Motion>", self._on_resize_motion)
                 self.canvas.bind("<ButtonRelease-1>", self._on_resize_release)
             return
-        resize_mode = self._hit_test_edge(node, event.x, event.y)
+        resize_mode = self._hit_test_edge(node, cx, cy)
         if resize_mode:
             self._resize_data["node"] = node
             self._resize_data["mode"] = resize_mode
-            self._resize_data["x"] = event.x
-            self._resize_data["y"] = event.y
+            self._resize_data["x"] = cx
+            self._resize_data["y"] = cy
             self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
             return
         self._drag_data["node"] = node
-        self._drag_data["x"] = event.x
-        self._drag_data["y"] = event.y
+        self._drag_data["x"] = cx
+        self._drag_data["y"] = cy
 
     def _on_canvas_press(self, event):
         if self._mode == "wire_port":
@@ -764,22 +778,24 @@ class DiagramApp:
             last_x, last_y = self._pending_midpoints[-1]
         else:
             last_x, last_y = start_x, start_y
-        snapped_x = self._snap_value(event.x)
-        snapped_y = self._snap_value(event.y)
+        cx, cy = self._cx(event), self._cy(event)
+        snapped_x = self._snap_value(cx)
+        snapped_y = self._snap_value(cy)
         cur_dir = self._current_wire_direction()
         if cur_dir == "horizontal":
             bend = (snapped_x, last_y)
         else:
             bend = (last_x, snapped_y)
         self._pending_midpoints.append(bend)
-        self._update_wire_preview(event.x, event.y)
+        self._update_wire_preview(cx, cy)
 
     def _on_canvas_motion(self, event):
+        cx, cy = self._cx(event), self._cy(event)
         if self._mode == "create_wire":
-            self._update_create_wire_preview(event.x, event.y)
+            self._update_create_wire_preview(cx, cy)
             return
         if self._mode == "connect" and len(self._selected_ports) == 1:
-            self._update_wire_preview(event.x, event.y)
+            self._update_wire_preview(cx, cy)
 
     def _on_release(self, _event):
         if self._drag_data["node"] and not self._resize_data["node"]:
@@ -799,8 +815,9 @@ class DiagramApp:
         node = self._drag_data["node"]
         if not node:
             return
-        dx = event.x - self._drag_data["x"]
-        dy = event.y - self._drag_data["y"]
+        cx, cy = self._cx(event), self._cy(event)
+        dx = cx - self._drag_data["x"]
+        dy = cy - self._drag_data["y"]
         target_x = node.x + dx
         target_y = node.y + dy
         snapped_x = self._snap_value(target_x)
@@ -813,8 +830,8 @@ class DiagramApp:
         dy = snapped_y - node.y
         if dx == 0 and dy == 0:
             return
-        self._drag_data["x"] = event.x
-        self._drag_data["y"] = event.y
+        self._drag_data["x"] = cx
+        self._drag_data["y"] = cy
         self.canvas.move(f"node:{node.name}", dx, dy)
         node.x += dx
         node.y += dy
@@ -896,12 +913,13 @@ class DiagramApp:
         orig = self._resize_data["orig"]
         if not node or not mode or not orig:
             return
+        cx, cy = self._cx(event), self._cy(event)
         if node.kind != "BLOCK" and node.kind not in self._CUSTOM_GATE_KINDS:
-            self._resize_gate(node, mode, orig, event)
+            self._resize_gate(node, mode, orig, cx, cy)
             return
         orig_x, orig_y, orig_width, orig_height = orig
-        dx = event.x - self._resize_data["x"]
-        dy = event.y - self._resize_data["y"]
+        dx = cx - self._resize_data["x"]
+        dy = cy - self._resize_data["y"]
         if node.kind == "BLOCK":
             min_width = 80
             min_height = 60
@@ -1010,7 +1028,7 @@ class DiagramApp:
             if port.side in ("left", "right"):
                 port.manual_y = node.y + port.offset * node.height
 
-    def _resize_gate(self, node: Node, mode: str, orig: tuple, event):
+    def _resize_gate(self, node: Node, mode: str, orig: tuple, cx: float, cy: float):
         base_image = self._gate_base_image(node.kind)
         if not base_image:
             return
@@ -1029,25 +1047,25 @@ class DiagramApp:
         anchor_x = orig_x
         anchor_y = orig_y
         if mode == "right" or mode == "bottom_right":
-            desired_w = max(min_size, event.x - orig_x)
+            desired_w = max(min_size, cx - orig_x)
             desired_w = self._snap_value(desired_w, min_size)
             desired_h = desired_w / aspect if aspect else desired_w
             anchor_x = orig_x
             anchor_y = orig_y
         elif mode == "top" or mode == "top_right":
-            desired_h = max(min_size, orig_bottom - event.y)
+            desired_h = max(min_size, orig_bottom - cy)
             desired_h = self._snap_value(desired_h, min_size)
             desired_w = desired_h * aspect
             anchor_x = orig_x
             anchor_y = orig_bottom
         elif mode == "left" or mode == "top_left":
-            desired_w = max(min_size, orig_right - event.x)
+            desired_w = max(min_size, orig_right - cx)
             desired_w = self._snap_value(desired_w, min_size)
             desired_h = desired_w / aspect if aspect else desired_w
             anchor_x = orig_right
             anchor_y = orig_bottom
         elif mode == "bottom" or mode == "bottom_left":
-            desired_h = max(min_size, event.y - orig_y)
+            desired_h = max(min_size, cy - orig_y)
             desired_h = self._snap_value(desired_h, min_size)
             desired_w = desired_h * aspect
             anchor_x = orig_right
@@ -1400,6 +1418,7 @@ class DiagramApp:
         return None
 
     def _on_wire_press(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -1638,6 +1657,7 @@ class DiagramApp:
             return
 
     def _on_wire_motion(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         connection: Connection | None = self._drag_wire["connection"]
         if not connection:
             return
@@ -1795,6 +1815,7 @@ class DiagramApp:
         self._status_selection_label.config(text=sel_text)
 
     def _on_label_press(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         if self._mode != "normal":
             return
         item = self.canvas.find_withtag("current")
@@ -1819,6 +1840,7 @@ class DiagramApp:
         self._label_drag_data["y"] = event.y
 
     def _on_label_motion(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         connection = self._label_drag_data.get("connection")
         if not connection or not connection.label_id:
             return
@@ -2322,6 +2344,7 @@ class DiagramApp:
         self._update_connections()
 
     def _on_port_press(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         if self._mode == "delete_port":
             self._handle_delete_port_click(event)
             return
@@ -2719,6 +2742,7 @@ class DiagramApp:
         self._record_history()
 
     def _handle_create_wire_press(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         start = self._create_wire_data.get("start")
         if start is None:
             start_x = self._snap_value(event.x)
@@ -3226,6 +3250,7 @@ class DiagramApp:
         self._mode = "normal"
 
     def _handle_create_port_click(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         if not self._active_node_name and self._pending_port_node_select:
             item = self.canvas.find_withtag("current")
             if item:
@@ -3253,6 +3278,7 @@ class DiagramApp:
         self._record_history()
 
     def _handle_wire_port_click(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
         connection = self._selected_wire
         if not connection or not connection.free_points:
             self._exit_wire_port_mode()
