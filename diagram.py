@@ -188,8 +188,20 @@ class DiagramApp:
         self.zoom_out_button.pack(side=tk.LEFT, padx=2)
         self.guide_button = ttk.Button(self.toolbar_row2, text="GUIDE", command=self._open_guide, style="Tool.TButton")
         self.guide_button.pack(side=tk.LEFT, padx=2)
-        self.canvas = tk.Canvas(self.root, width=1200, height=800, bg="white")
-        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas_frame = tk.Frame(self.root)
+        self._canvas_frame.pack(fill=tk.BOTH, expand=True)
+        self._h_scroll = tk.Scrollbar(self._canvas_frame, orient=tk.HORIZONTAL)
+        self._h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self._v_scroll = tk.Scrollbar(self._canvas_frame, orient=tk.VERTICAL)
+        self._v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas = tk.Canvas(
+            self._canvas_frame, width=1200, height=800, bg="white",
+            xscrollcommand=self._h_scroll.set,
+            yscrollcommand=self._v_scroll.set,
+        )
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._h_scroll.config(command=self.canvas.xview)
+        self._v_scroll.config(command=self.canvas.yview)
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
         self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
@@ -284,13 +296,27 @@ class DiagramApp:
 
     GRID_SPACING = 20
 
+    def _update_scroll_region(self):
+        bbox = self._content_bbox()
+        if not bbox:
+            self.canvas.configure(scrollregion=(0, 0, 1200, 800))
+            return
+        cw = self.canvas.winfo_width() or 1200
+        ch = self.canvas.winfo_height() or 800
+        margin = 100
+        x1 = min(bbox[0] - margin, 0)
+        y1 = min(bbox[1] - margin, 0)
+        x2 = max(bbox[2] + margin, cw)
+        y2 = max(bbox[3] + margin, ch)
+        self.canvas.configure(scrollregion=(x1, y1, x2, y2))
+
     def _draw_grid(self):
         self._clear_grid()
         if not self._show_ports:
             return
         canvas_w = max(self.canvas.winfo_width(), 1200)
         canvas_h = max(self.canvas.winfo_height(), 800)
-        bbox = self.canvas.bbox("all")
+        bbox = self._content_bbox()
         if bbox:
             x_start = min(int(bbox[0]), 0) - 200
             y_start = min(int(bbox[1]), 0) - 200
@@ -805,6 +831,15 @@ class DiagramApp:
         right = node.x + node.width
         top = node.y
         bottom = node.y + node.height
+        corner_t = threshold * 1.5
+        if abs(x - left) <= corner_t and abs(y - top) <= corner_t:
+            return "top_left"
+        if abs(x - right) <= corner_t and abs(y - top) <= corner_t:
+            return "top_right"
+        if abs(x - left) <= corner_t and abs(y - bottom) <= corner_t:
+            return "bottom_left"
+        if abs(x - right) <= corner_t and abs(y - bottom) <= corner_t:
+            return "bottom_right"
         if left - threshold <= x <= right + threshold and abs(y - top) <= threshold:
             return "top"
         if left - threshold <= x <= right + threshold and abs(y - bottom) <= threshold:
@@ -906,6 +941,59 @@ class DiagramApp:
                         port.manual_y = prev[1]
             else:
                 self._reposition_gate_ports(node)
+        elif mode.startswith("top_") or mode.startswith("bottom_"):
+            aspect = orig_width / orig_height if orig_height else 1.0
+            if mode == "bottom_right":
+                new_width = max(min_width, orig_width + dx)
+                new_height = new_width / aspect if aspect else new_width
+                if new_height < min_height:
+                    new_height = min_height
+                    new_width = new_height * aspect
+                new_width = self._snap_value(new_width, min_width)
+                new_height = self._snap_value(new_width / aspect if aspect else new_width, min_height)
+                node.width = new_width
+                node.height = new_height
+            elif mode == "bottom_left":
+                new_width = max(min_width, orig_width - dx)
+                new_height = new_width / aspect if aspect else new_width
+                if new_height < min_height:
+                    new_height = min_height
+                    new_width = new_height * aspect
+                new_width = self._snap_value(new_width, min_width)
+                new_height = self._snap_value(new_width / aspect if aspect else new_width, min_height)
+                node.x = orig_x + (orig_width - new_width)
+                node.width = new_width
+                node.height = new_height
+            elif mode == "top_right":
+                new_width = max(min_width, orig_width + dx)
+                new_height = new_width / aspect if aspect else new_width
+                if new_height < min_height:
+                    new_height = min_height
+                    new_width = new_height * aspect
+                new_width = self._snap_value(new_width, min_width)
+                new_height = self._snap_value(new_width / aspect if aspect else new_width, min_height)
+                node.y = orig_y + (orig_height - new_height)
+                node.width = new_width
+                node.height = new_height
+            elif mode == "top_left":
+                new_width = max(min_width, orig_width - dx)
+                new_height = new_width / aspect if aspect else new_width
+                if new_height < min_height:
+                    new_height = min_height
+                    new_width = new_height * aspect
+                new_width = self._snap_value(new_width, min_width)
+                new_height = self._snap_value(new_width / aspect if aspect else new_width, min_height)
+                node.x = orig_x + (orig_width - new_width)
+                node.y = orig_y + (orig_height - new_height)
+                node.width = new_width
+                node.height = new_height
+            if node.kind != "BLOCK":
+                self._reposition_gate_ports(node)
+            else:
+                for port, prev in old_port_positions:
+                    if port.side in ("left", "right"):
+                        ratio = (prev[1] - orig_y) / orig_height if orig_height else 0.5
+                        port.manual_y = node.y + ratio * node.height
         self._redraw_node(node)
         self._update_connections()
         self._draw_alignment_guides(node)
@@ -938,30 +1026,32 @@ class DiagramApp:
         aspect = base_w / base_h if base_h else 1.0
         min_size = self.GRID_STEP
 
-        if mode == "right":
+        anchor_x = orig_x
+        anchor_y = orig_y
+        if mode == "right" or mode == "bottom_right":
             desired_w = max(min_size, event.x - orig_x)
             desired_w = self._snap_value(desired_w, min_size)
             desired_h = desired_w / aspect if aspect else desired_w
-            node.x = orig_x
-            node.y = orig_bottom - desired_h
-        elif mode == "top":
+            anchor_x = orig_x
+            anchor_y = orig_y
+        elif mode == "top" or mode == "top_right":
             desired_h = max(min_size, orig_bottom - event.y)
             desired_h = self._snap_value(desired_h, min_size)
             desired_w = desired_h * aspect
-            node.x = orig_x
-            node.y = orig_bottom - desired_h
-        elif mode == "left":
+            anchor_x = orig_x
+            anchor_y = orig_bottom
+        elif mode == "left" or mode == "top_left":
             desired_w = max(min_size, orig_right - event.x)
             desired_w = self._snap_value(desired_w, min_size)
             desired_h = desired_w / aspect if aspect else desired_w
-            node.x = orig_right - desired_w
-            node.y = orig_y
-        elif mode == "bottom":
+            anchor_x = orig_right
+            anchor_y = orig_bottom
+        elif mode == "bottom" or mode == "bottom_left":
             desired_h = max(min_size, event.y - orig_y)
             desired_h = self._snap_value(desired_h, min_size)
             desired_w = desired_h * aspect
-            node.x = orig_right - desired_w
-            node.y = orig_y
+            anchor_x = orig_right
+            anchor_y = orig_y
         else:
             return
 
@@ -970,14 +1060,15 @@ class DiagramApp:
         node.image_subsample = subsample
         node.width = base_w / subsample if subsample else base_w
         node.height = base_h / subsample if subsample else base_h
-        if mode in ("right", "top"):
+        if anchor_x == orig_x:
             node.x = orig_x
-            node.y = orig_bottom - node.height
         else:
-            node.x = orig_right - node.width
+            node.x = anchor_x - node.width
+        if anchor_y == orig_y:
             node.y = orig_y
-        if mode in ("top", "bottom"):
-            self._reposition_gate_ports(node)
+        else:
+            node.y = anchor_y - node.height
+        self._reposition_gate_ports(node)
         self._clamp_ports_to_node(node)
         self._redraw_node(node)
         self._update_connections()
@@ -3016,8 +3107,9 @@ class DiagramApp:
         left, right = node.x, node.x + node.width
         top, bottom = node.y, node.y + node.height
         for port, (px, py) in old_positions:
-            rx = cx + (py - cy) + shift_x
-            ry = cy - (px - cx) + shift_y
+            # Clockwise 90°: (x,y) relative to center -> (-y, x)
+            rx = cx - (py - cy) + shift_x
+            ry = cy + (px - cx) + shift_y
             distances = {
                 "left": abs(rx - left),
                 "right": abs(rx - right),
@@ -3307,9 +3399,19 @@ class DiagramApp:
             if connection.label_y is not None:
                 connection.label_y *= factor
         self._draw_grid()
+        for connection in self.connections:
+            if connection.line_id:
+                self.canvas.delete(connection.line_id)
+                connection.line_id = None
+            if connection.label_id:
+                self.canvas.delete(connection.label_id)
+                connection.label_id = None
         for node in self.nodes.values():
             self._redraw_node(node)
-        self._update_connections()
+        for connection in self.connections:
+            self._draw_connection(connection)
+        self._apply_z_order()
+        self._update_scroll_region()
 
     def _zoom_in(self):
         self._apply_zoom(1.1)
@@ -3479,11 +3581,13 @@ class DiagramApp:
         if initial:
             self._history = [state]
             self._redo_stack = []
+            self._update_scroll_region()
             return
         if self._history and self._history[-1] == state:
             return
         self._history.append(state)
         self._redo_stack = []
+        self._update_scroll_region()
 
     def _load_state(self, state: dict[str, object]):
         self._suspend_history = True
@@ -3518,6 +3622,7 @@ class DiagramApp:
             self._draw_connection(connection)
         self._apply_z_order()
         self._update_connections()
+        self._update_scroll_region()
         self._suspend_history = False
 
     def _undo(self):
