@@ -804,6 +804,14 @@ class DiagramApp:
 
     def _on_release(self, _event):
         if self._drag_data["node"] and not self._resize_data["node"]:
+            node = self._drag_data["node"]
+            for connection in self.connections:
+                if connection.waypoints and (connection.src or connection.dst):
+                    src_node = connection.src[0] if connection.src else None
+                    dst_node = connection.dst[0] if connection.dst else None
+                    if src_node == node.name or dst_node == node.name:
+                        self._simplify_waypoints(connection)
+            self._update_connections()
             self._record_history()
         self._drag_data["node"] = None
         self._resize_data["node"] = None
@@ -1013,10 +1021,9 @@ class DiagramApp:
             if node.kind != "BLOCK":
                 self._reposition_gate_ports(node)
             else:
-                for port, prev in old_port_positions:
+                for port in node.inputs + node.outputs:
                     if port.side in ("left", "right"):
-                        ratio = (prev[1] - orig_y) / orig_height if orig_height else 0.5
-                        port.manual_y = node.y + ratio * node.height
+                        port.manual_y = node.y + port.offset * node.height
         self._redraw_node(node)
         self._update_connections()
         self._draw_alignment_guides(node)
@@ -1332,12 +1339,20 @@ class DiagramApp:
                 src_side = self._port_side((src_node, src_port))
                 dst_side = self._port_side((dst_node, dst_port))
                 points = [(x1, y1)]
+                first_wp = True
                 for wx, wy in connection.waypoints:
                     last_x, last_y = points[-1]
-                    if last_x != wx:
-                        points.append((wx, last_y))
-                    if last_y != wy:
-                        points.append((wx, wy))
+                    if first_wp and src_side in ("top", "bottom"):
+                        if last_y != wy:
+                            points.append((last_x, wy))
+                        if last_x != wx:
+                            points.append((wx, wy))
+                    else:
+                        if last_x != wx:
+                            points.append((wx, last_y))
+                        if last_y != wy:
+                            points.append((wx, wy))
+                    first_wp = False
                 last_x, last_y = points[-1]
                 if dst_side in ("left", "right"):
                     if last_y != y2:
@@ -1349,7 +1364,21 @@ class DiagramApp:
                         points.append((x2, last_y))
                     if last_y != y2:
                         points.append((x2, y2))
-                coords = [c for p in points for c in p]
+                # Clean up collinear and backtracking points
+                cleaned = [points[0]]
+                for i in range(1, len(points)):
+                    p = points[i]
+                    if p == cleaned[-1]:
+                        continue
+                    while len(cleaned) >= 2:
+                        prev = cleaned[-2]
+                        curr = cleaned[-1]
+                        if (prev[0] == curr[0] == p[0]) or (prev[1] == curr[1] == p[1]):
+                            cleaned.pop()
+                        else:
+                            break
+                    cleaned.append(p)
+                coords = [c for p in cleaned for c in p]
                 return coords if len(coords) >= 4 else [x1, y1, x2, y2]
             if connection.manual_mid_x is not None:
                 return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
@@ -1405,20 +1434,22 @@ class DiagramApp:
             return
         src = self._port_center(src_id)
         dst = self._port_center(dst_id)
-        points = [src] + connection.waypoints + [dst]
-        simplified = [points[0]]
-        for i in range(1, len(points) - 1):
-            prev = simplified[-1]
-            curr = points[i]
-            nxt = points[i + 1]
-            if (prev[0] == curr[0] == nxt[0]) or (prev[1] == curr[1] == nxt[1]):
+        points = [src] + list(connection.waypoints) + [dst]
+        # Remove duplicates and collinear/backtracking points
+        cleaned = [points[0]]
+        for i in range(1, len(points)):
+            p = points[i]
+            if p == cleaned[-1]:
                 continue
-            if curr == prev:
-                continue
-            simplified.append(curr)
-        if points[-1] != simplified[-1]:
-            simplified.append(points[-1])
-        connection.waypoints = list(simplified[1:-1])
+            while len(cleaned) >= 2:
+                prev = cleaned[-2]
+                curr = cleaned[-1]
+                if (prev[0] == curr[0] == p[0]) or (prev[1] == curr[1] == p[1]):
+                    cleaned.pop()
+                else:
+                    break
+            cleaned.append(p)
+        connection.waypoints = list(cleaned[1:-1])
 
     def _find_port(self, node_name: str, port_name: str, kind: str | None = None) -> tuple[Node, Port] | None:
         node = self.nodes.get(node_name)
