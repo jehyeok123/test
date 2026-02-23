@@ -39,6 +39,8 @@ class Node:
     label_font_size: int = 12
     label_font_family: str = "Arial"
     label_font_weight: str = "bold"
+    label_h_align: str = "left"
+    label_v_align: str = "top"
     level: int = 0
     rotation: int = 0
     image: tk.PhotoImage | None = None
@@ -205,6 +207,7 @@ class DiagramApp:
         self._drag_data = {"node": None, "x": 0, "y": 0}
         self._drag_wire = {"connection": None, "offset": 0.0, "mode": None, "port": None, "node": None}
         self._resize_data = {"node": None, "mode": None, "x": 0, "y": 0, "orig": None}
+        self._port_drag_data: dict = {"node": None, "port": None, "x": 0, "y": 0}
         self._mode = "normal"
         self._show_ports = True
         self._port_items: dict[int, tuple[str, str]] = {}
@@ -261,6 +264,8 @@ class DiagramApp:
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
         self.canvas.tag_bind("port", "<ButtonPress-1>", self._on_port_press)
+        self.canvas.tag_bind("port", "<B1-Motion>", self._on_port_motion)
+        self.canvas.tag_bind("port", "<ButtonRelease-1>", self._on_port_release)
         self.canvas.tag_bind("wire", "<ButtonPress-1>", self._on_wire_press)
         self.canvas.tag_bind("wire", "<B1-Motion>", self._on_wire_motion)
         self.canvas.tag_bind("wire", "<ButtonRelease-1>", self._on_wire_release)
@@ -602,12 +607,34 @@ class DiagramApp:
             )
             node.items.append(rect)
         if node.kind == "BLOCK":
+            pad = 6
+            h_align = getattr(node, "label_h_align", "left")
+            v_align = getattr(node, "label_v_align", "top")
+            if h_align == "left":
+                lx = x1 + pad
+                anchor_h = "w"
+            elif h_align == "center":
+                lx = (x1 + x2) / 2
+                anchor_h = ""
+            else:
+                lx = x2 - pad
+                anchor_h = "e"
+            if v_align == "top":
+                ly = y1 + pad
+                anchor_v = "n"
+            elif v_align == "center":
+                ly = (y1 + y2) / 2
+                anchor_v = ""
+            else:
+                ly = y2 - pad
+                anchor_v = "s"
+            anchor = anchor_v + anchor_h if (anchor_v or anchor_h) else "center"
             label = self.canvas.create_text(
-                x1 + 6,
-                y1 + 6,
+                lx,
+                ly,
                 text=node.name,
                 font=(node.label_font_family, node.label_font_size, node.label_font_weight),
-                anchor="nw",
+                anchor=anchor,
             )
             node.items.append(label)
 
@@ -829,6 +856,31 @@ class DiagramApp:
         if not node:
             return
         cx, cy = self._cx(event), self._cy(event)
+        # PORT nodes: constrain movement along parent wire
+        if node.kind == "PORT":
+            parent_wire = self._find_parent_wire(node)
+            if parent_wire and parent_wire.free_points:
+                coords = self._connection_line_coords(parent_wire)
+                if coords and len(coords) >= 4:
+                    px, py = self._nearest_point_on_polyline(coords, cx, cy)
+                    half = node.width / 2
+                    new_x = int(round(px - half))
+                    new_y = int(round(py - half))
+                    ddx = new_x - node.x
+                    ddy = new_y - node.y
+                    if ddx == 0 and ddy == 0:
+                        return
+                    self._drag_data["x"] = cx
+                    self._drag_data["y"] = cy
+                    self.canvas.move(f"node:{node.name}", ddx, ddy)
+                    node.x += ddx
+                    node.y += ddy
+                    for port in node.inputs + node.outputs:
+                        if port.manual_y is not None:
+                            port.manual_y += ddy
+                    self._update_connections()
+                    self._draw_point_alignment_guides(px, py)
+                    return
         dx = cx - self._drag_data["x"]
         dy = cy - self._drag_data["y"]
         target_x = node.x + dx
@@ -1158,10 +1210,14 @@ class DiagramApp:
                 1 if active_node_name and node.name == active_node_name else 0,
             )
         )
-        for node in nodes:
+        non_port_nodes = [n for n in nodes if n.kind != "PORT"]
+        port_nodes = [n for n in nodes if n.kind == "PORT"]
+        for node in non_port_nodes:
             self.canvas.tag_raise(f"node:{node.name}")
         for connection in self.connections:
             self._raise_connection(connection)
+        for node in port_nodes:
+            self.canvas.tag_raise(f"node:{node.name}")
 
     def _next_level(self) -> int:
         if not self.nodes:
@@ -1485,6 +1541,13 @@ class DiagramApp:
         self._deselect_wire()
         self._selected_wire = connection
         self.canvas.itemconfigure(line_id, width=self._wire_selected_width(connection))
+        # Free-point wire: enable whole-wire drag
+        if connection.free_points and not connection.src and not connection.dst:
+            self._drag_wire["connection"] = connection
+            self._drag_wire["mode"] = "free_wire"
+            self._drag_wire["x"] = event.x
+            self._drag_wire["y"] = event.y
+            return
         coords = self._connection_line_coords(connection)
         if not coords:
             return
@@ -1705,6 +1768,35 @@ class DiagramApp:
         if not connection:
             return
         mode = self._drag_wire["mode"]
+        if mode == "free_wire":
+            dx = event.x - self._drag_wire["x"]
+            dy = event.y - self._drag_wire["y"]
+            snapped_dx = self._snap_value(dx) if abs(dx) >= self.GRID_STEP / 2 else 0
+            snapped_dy = self._snap_value(dy) if abs(dy) >= self.GRID_STEP / 2 else 0
+            if snapped_dx == 0 and snapped_dy == 0:
+                return
+            self._drag_wire["x"] = event.x
+            self._drag_wire["y"] = event.y
+            connection.free_points = [(px + snapped_dx, py + snapped_dy) for px, py in connection.free_points]
+            coords = self._connection_line_coords(connection)
+            if coords and connection.line_id:
+                self.canvas.coords(connection.line_id, *coords)
+            # Move PORT nodes on this wire
+            for node in list(self.nodes.values()):
+                if node.kind == "PORT" and self._find_parent_wire(node) is connection:
+                    self.canvas.move(f"node:{node.name}", snapped_dx, snapped_dy)
+                    node.x += snapped_dx
+                    node.y += snapped_dy
+                    for port in node.inputs + node.outputs:
+                        if port.manual_y is not None:
+                            port.manual_y += snapped_dy
+            self._update_connections()
+            # Alignment guides based on wire center
+            if connection.free_points:
+                avg_x = sum(p[0] for p in connection.free_points) / len(connection.free_points)
+                avg_y = sum(p[1] for p in connection.free_points) / len(connection.free_points)
+                self._draw_point_alignment_guides(avg_x, avg_y)
+            return
         if mode == "mid":
             raw_mid = event.x - self._drag_wire["offset"]
             connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
@@ -1859,6 +1951,16 @@ class DiagramApp:
 
     def _on_label_press(self, event):
         event.x, event.y = self._cx(event), self._cy(event)
+        if self._delete_mode:
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            label_id = item[0]
+            connection = next((c for c in self.connections if c.label_id == label_id), None)
+            if not connection:
+                return
+            self._remove_connection(connection)
+            return
         if self._mode != "normal":
             return
         item = self.canvas.find_withtag("current")
@@ -1897,6 +1999,7 @@ class DiagramApp:
         lx, ly = self.canvas.coords(connection.label_id)
         connection.label_x = lx
         connection.label_y = ly
+        self._draw_point_alignment_guides(lx, ly)
 
     def _on_label_release(self, _event):
         if self._label_drag_data.get("connection"):
@@ -2386,10 +2489,48 @@ class DiagramApp:
             self.canvas.coords(port.canvas_id, new_x - radius, y - radius, new_x + radius, y + radius)
         self._update_connections()
 
+    def _on_port_motion(self, event):
+        event.x, event.y = self._cx(event), self._cy(event)
+        node = self._port_drag_data.get("node")
+        port = self._port_drag_data.get("port")
+        if not node or not port:
+            return
+        self._move_port(node, port, event.x, event.y)
+        if port.canvas_id:
+            px, py = self._port_center(port.canvas_id)
+            self._draw_point_alignment_guides(px, py)
+
+    def _on_port_release(self, _event):
+        if self._port_drag_data.get("node"):
+            self._record_history()
+        self._port_drag_data = {"node": None, "port": None, "x": 0, "y": 0}
+        self._clear_alignment_guides()
+
     def _on_port_press(self, event):
         event.x, event.y = self._cx(event), self._cy(event)
         if self._mode == "delete_port":
             self._handle_delete_port_click(event)
+            return
+        if self._mode == "normal":
+            item = self.canvas.find_withtag("current")
+            if not item:
+                return
+            port_info = self._port_items.get(item[0])
+            if not port_info:
+                return
+            node_name, port_name = port_info
+            node = self.nodes.get(node_name)
+            if not node:
+                return
+            for port in node.inputs + node.outputs:
+                if port.name == port_name:
+                    self._port_drag_data = {
+                        "node": node,
+                        "port": port,
+                        "x": event.x,
+                        "y": event.y,
+                    }
+                    return
             return
         if self._mode != "connect":
             return
@@ -2507,6 +2648,14 @@ class DiagramApp:
         outline_style_var = tk.StringVar(value="Solid")
         outline_style_menu = tk.OptionMenu(block_frame, outline_style_var, "Solid", "Dashed")
         outline_style_menu.grid(row=8, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Name H-Align").grid(row=9, column=0, padx=6, pady=6, sticky="w")
+        h_align_var = tk.StringVar(value="Left")
+        h_align_menu = tk.OptionMenu(block_frame, h_align_var, "Left", "Center", "Right")
+        h_align_menu.grid(row=9, column=1, padx=6, pady=6, sticky="w")
+        tk.Label(block_frame, text="Name V-Align").grid(row=10, column=0, padx=6, pady=6, sticky="w")
+        v_align_var = tk.StringVar(value="Top")
+        v_align_menu = tk.OptionMenu(block_frame, v_align_var, "Top", "Center", "Bottom")
+        v_align_menu.grid(row=10, column=1, padx=6, pady=6, sticky="w")
 
         tk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
         gate_var = tk.StringVar(value="AND2")
@@ -2559,6 +2708,8 @@ class DiagramApp:
             thickness_map = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
             outline_thickness_var.set(thickness_map.get(node.outline_scale, "Normal"))
             outline_style_var.set("Dashed" if node.outline_style == "dashed" else "Solid")
+            h_align_var.set(getattr(node, "label_h_align", "left").capitalize())
+            v_align_var.set(getattr(node, "label_v_align", "top").capitalize())
 
         def _apply_block_changes(target: Node, new_name: str):
             target.name = new_name
@@ -2571,6 +2722,8 @@ class DiagramApp:
             target.outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
             target.outline_style = "dashed" if outline_style_var.get() == "Dashed" else "solid"
             target.outline_enabled = outline_enabled_var.get()
+            target.label_h_align = h_align_var.get().lower()
+            target.label_v_align = v_align_var.get().lower()
             self._redraw_node(target)
 
         def _create_or_edit():
@@ -3080,7 +3233,7 @@ class DiagramApp:
         if self._mode == "create_port":
             self._reset_port_mode()
             return
-        if self._selected_wire and self._selected_wire.free_points:
+        if self._selected_wire and (self._selected_wire.free_points or self._selected_wire.line_id):
             if self._mode == "wire_port":
                 self._exit_wire_port_mode()
                 return
@@ -3106,7 +3259,7 @@ class DiagramApp:
                     if port.side in ("left", "right"):
                         port.manual_y = current_y
             self._outline_backup.setdefault(node.name, node.outline_color)
-            node.outline_color = "green"
+            node.outline_color = "#4A90D9"
             node.resize_enabled = True
             self._redraw_node(node)
         else:
@@ -3323,7 +3476,7 @@ class DiagramApp:
     def _handle_wire_port_click(self, event):
         event.x, event.y = self._cx(event), self._cy(event)
         connection = self._selected_wire
-        if not connection or not connection.free_points:
+        if not connection or not connection.line_id:
             self._exit_wire_port_mode()
             return
         coords = self._connection_line_coords(connection)
@@ -3335,6 +3488,29 @@ class DiagramApp:
             return
         self._create_junction_at(px, py)
         self._exit_wire_port_mode()
+
+    def _find_parent_wire(self, node: Node) -> Connection | None:
+        """Find the free-point wire that a PORT node sits on."""
+        if node.kind != "PORT":
+            return None
+        center_x = node.x + node.width / 2
+        center_y = node.y + node.height / 2
+        best_conn = None
+        best_dist = float("inf")
+        for conn in self.connections:
+            if not conn.free_points:
+                continue
+            coords = self._connection_line_coords(conn)
+            if not coords or len(coords) < 4:
+                continue
+            px, py = self._nearest_point_on_polyline(coords, center_x, center_y)
+            dist = self._distance_squared(px, py, center_x, center_y)
+            if dist < best_dist:
+                best_dist = dist
+                best_conn = conn
+        if best_dist < 20 ** 2:
+            return best_conn
+        return None
 
     def _create_junction_at(self, x: float, y: float):
         name = self._unique_node_name("Junction")
@@ -3373,16 +3549,18 @@ class DiagramApp:
             return
         if connection.line_id not in self._wire_port_backup:
             current_width = int(float(self.canvas.itemcget(connection.line_id, "width") or 0))
-            self._wire_port_backup[connection.line_id] = current_width
-        self.canvas.itemconfig(connection.line_id, width=max(6, self._wire_width(connection) + 3))
+            current_color = self.canvas.itemcget(connection.line_id, "fill") or connection.line_color
+            self._wire_port_backup[connection.line_id] = (current_width, current_color)
+        self.canvas.itemconfig(connection.line_id, width=max(6, self._wire_width(connection) + 3), fill="#4A90D9")
         self._mode = "wire_port"
 
     def _exit_wire_port_mode(self):
         connection = self._selected_wire
         if connection and connection.line_id:
-            original = self._wire_port_backup.pop(connection.line_id, None)
-            if original is not None:
-                self.canvas.itemconfig(connection.line_id, width=original)
+            backup = self._wire_port_backup.pop(connection.line_id, None)
+            if backup is not None:
+                orig_width, orig_color = backup
+                self.canvas.itemconfig(connection.line_id, width=orig_width, fill=orig_color)
         self._mode = "normal"
 
     def _handle_delete_port_click(self, event):
@@ -3407,6 +3585,11 @@ class DiagramApp:
         self._reset_port_mode()
 
     def _bring_active_front(self):
+        if self._selected_wire and self._selected_wire.line_id:
+            self.canvas.tag_raise(self._selected_wire.line_id)
+            if self._selected_wire.label_id:
+                self.canvas.tag_raise(self._selected_wire.label_id)
+            return
         if not self._active_node_name:
             return
         node = self.nodes.get(self._active_node_name)
@@ -3420,6 +3603,12 @@ class DiagramApp:
         self._record_history()
 
     def _send_active_back(self):
+        if self._selected_wire and self._selected_wire.line_id:
+            self.canvas.tag_lower(self._selected_wire.line_id)
+            if self._selected_wire.label_id:
+                self.canvas.tag_lower(self._selected_wire.label_id)
+            self.canvas.tag_lower("grid")
+            return
         if not self._active_node_name:
             return
         node = self.nodes.get(self._active_node_name)
@@ -3574,6 +3763,8 @@ class DiagramApp:
                     "font_family": node.label_font_family,
                     "font_weight": node.label_font_weight,
                     "rotation": node.rotation,
+                    "label_h_align": getattr(node, "label_h_align", "left"),
+                    "label_v_align": getattr(node, "label_v_align", "top"),
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -4103,6 +4294,8 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
         font_family = str(block.get("font_family", "Arial"))
         font_weight = str(block.get("font_weight", "bold"))
         rotation = int(block.get("rotation", 0) or 0)
+        label_h_align = str(block.get("label_h_align", "left"))
+        label_v_align = str(block.get("label_v_align", "top"))
         node = Node(
             name=name,
             kind=kind,
@@ -4121,6 +4314,8 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             label_font_size=font_size,
             label_font_family=font_family,
             label_font_weight=font_weight,
+            label_h_align=label_h_align,
+            label_v_align=label_v_align,
             level=int(level) if level is not None else 0,
             rotation=rotation,
         )
