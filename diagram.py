@@ -364,6 +364,8 @@ class DiagramApp:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
             return None
+        w = max(1, int(round(w)))
+        h = max(1, int(round(h)))
         scale = 3
         sw, sh = w * scale, h * scale
         img = Image.new("RGBA", (sw, sh), (255, 255, 255, 0))
@@ -768,7 +770,10 @@ class DiagramApp:
             return
         item = self.canvas.find_withtag("current")
         if item:
-            return
+            tags = self.canvas.gettags(item[0])
+            # Don't block bend creation when clicking on grid lines or wire preview
+            if "grid" not in tags and item[0] != self._wire_preview_id:
+                return
         node_name, port_name = self._selected_ports[0]
         port_id = self._get_port_canvas_id(node_name, port_name)
         if not port_id:
@@ -1273,17 +1278,18 @@ class DiagramApp:
         mid_y = manual_mid_y if manual_mid_y is not None else (y1 + y2) / 2
         return [x1, y1, x1, mid_y, x2, mid_y, x2, y2]
 
-    @staticmethod
     def _connection_coords_orthogonal(
+        self,
+        connection: Connection,
         start: tuple[float, float],
         end: tuple[float, float],
-        prefer_vertical_end: bool,
     ) -> list[float]:
         x1, y1 = start
         x2, y2 = end
-        if prefer_vertical_end:
-            return [x1, y1, x2, y1, x2, y2]
-        return [x1, y1, x1, y2, x2, y2]
+        src_side = self._port_side(connection.src) if connection.src else None
+        if src_side in ("top", "bottom"):
+            return [x1, y1, x1, y2, x2, y2]
+        return [x1, y1, x2, y1, x2, y2]
 
     def _connection_orientation(self, connection: Connection) -> str | None:
         if connection.manual_mid_x is not None:
@@ -1323,6 +1329,8 @@ class DiagramApp:
             x1, y1 = self._port_center(src_port_id)
             x2, y2 = self._port_center(dst_port_id)
             if connection.waypoints:
+                src_side = self._port_side((src_node, src_port))
+                dst_side = self._port_side((dst_node, dst_port))
                 points = [(x1, y1)]
                 for wx, wy in connection.waypoints:
                     last_x, last_y = points[-1]
@@ -1331,10 +1339,16 @@ class DiagramApp:
                     if last_y != wy:
                         points.append((wx, wy))
                 last_x, last_y = points[-1]
-                if last_x != x2:
-                    points.append((x2, last_y))
-                if last_y != y2:
-                    points.append((x2, y2))
+                if dst_side in ("left", "right"):
+                    if last_y != y2:
+                        points.append((last_x, y2))
+                    if last_x != x2:
+                        points.append((x2, y2))
+                else:
+                    if last_x != x2:
+                        points.append((x2, last_y))
+                    if last_y != y2:
+                        points.append((x2, y2))
                 coords = [c for p in points for c in p]
                 return coords if len(coords) >= 4 else [x1, y1, x2, y2]
             if connection.manual_mid_x is not None:
@@ -1347,9 +1361,7 @@ class DiagramApp:
             if orientation == "vertical":
                 return self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             if orientation == "orthogonal":
-                dst_side = self._port_side((dst_node, dst_port))
-                prefer_vertical_end = dst_side in ("top", "bottom")
-                return self._connection_coords_orthogonal((x1, y1), (x2, y2), prefer_vertical_end)
+                return self._connection_coords_orthogonal(connection, (x1, y1), (x2, y2))
             return self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
         if connection.dst:
             dst_node, dst_port = connection.dst
