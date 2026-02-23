@@ -168,6 +168,10 @@ class DiagramApp:
             self.toolbar_row2, text="DELETE PORT (CTRL+A)", command=self._toggle_delete_port_mode, style="Tool.TButton"
         )
         self.delete_port_button.pack(side=tk.LEFT, padx=2)
+        self.move_port_button = ttk.Button(
+            self.toolbar_row2, text="MOVE PORT (SHIFT+A)", command=self._toggle_move_port_mode, style="Tool.TButton"
+        )
+        self.move_port_button.pack(side=tk.LEFT, padx=2)
         self.port_toggle_button = ttk.Button(
             self.toolbar_row2, text="SHOW/HIDE PORT (`)", command=self._toggle_ports, style="Tool.TButton"
         )
@@ -288,6 +292,7 @@ class DiagramApp:
         self.root.bind("s", lambda _event: self._handle_s_key())
         self.root.bind("w", lambda _event: self._toggle_connect_mode())
         self.root.bind("a", lambda _event: self._toggle_create_port_mode())
+        self.root.bind("A", lambda _event: self._toggle_move_port_mode())
         self.root.bind("<Control-w>", lambda _event: self._toggle_create_wire_mode())
         self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
         self.canvas.bind("<B2-Motion>", self._on_pan_motion)
@@ -829,6 +834,34 @@ class DiagramApp:
         if self._mode == "connect" and len(self._selected_ports) == 1:
             self._update_wire_preview(cx, cy)
 
+    def _snap_junctions_to_wires(self):
+        """Snap all PORT (junction) nodes to the nearest point on their parent wire."""
+        for node in list(self.nodes.values()):
+            if node.kind != "PORT":
+                continue
+            parent = self._find_parent_wire(node)
+            if not parent:
+                continue
+            coords = self._connection_line_coords(parent)
+            if not coords or len(coords) < 4:
+                continue
+            cx = node.x + node.width / 2
+            cy = node.y + node.height / 2
+            px, py = self._nearest_point_on_polyline(coords, cx, cy)
+            half = node.width / 2
+            new_x = int(round(px - half))
+            new_y = int(round(py - half))
+            ddx = new_x - node.x
+            ddy = new_y - node.y
+            if ddx == 0 and ddy == 0:
+                continue
+            self.canvas.move(f"node:{node.name}", ddx, ddy)
+            node.x += ddx
+            node.y += ddy
+            for port in node.inputs + node.outputs:
+                if port.manual_y is not None:
+                    port.manual_y += ddy
+
     def _on_release(self, _event):
         if self._drag_data["node"] and not self._resize_data["node"]:
             node = self._drag_data["node"]
@@ -838,6 +871,8 @@ class DiagramApp:
                     dst_node = connection.dst[0] if connection.dst else None
                     if src_node == node.name or dst_node == node.name:
                         self._simplify_waypoints(connection)
+            self._update_connections()
+            self._snap_junctions_to_wires()
             self._update_connections()
             self._record_history()
         self._drag_data["node"] = None
@@ -1191,7 +1226,6 @@ class DiagramApp:
                 min_y = y1 + radius
                 max_y = y2 - radius
                 clamped = max(min_y, min(port.manual_y, max_y))
-                clamped = self._snap_value(clamped, int(min_y))
                 port.manual_y = clamped
                 port.offset = 0 if y2 == y1 else (clamped - y1) / (y2 - y1)
             else:
@@ -1791,6 +1825,27 @@ class DiagramApp:
                         if port.manual_y is not None:
                             port.manual_y += snapped_dy
             self._update_connections()
+            # Re-snap PORT nodes to wire to prevent drift
+            for node in list(self.nodes.values()):
+                if node.kind == "PORT" and self._find_parent_wire(node) is connection:
+                    coords = self._connection_line_coords(connection)
+                    if coords and len(coords) >= 4:
+                        ncx = node.x + node.width / 2
+                        ncy = node.y + node.height / 2
+                        px, py = self._nearest_point_on_polyline(coords, ncx, ncy)
+                        half = node.width / 2
+                        new_x = int(round(px - half))
+                        new_y = int(round(py - half))
+                        ddx2 = new_x - node.x
+                        ddy2 = new_y - node.y
+                        if ddx2 != 0 or ddy2 != 0:
+                            self.canvas.move(f"node:{node.name}", ddx2, ddy2)
+                            node.x += ddx2
+                            node.y += ddy2
+                            for port in node.inputs + node.outputs:
+                                if port.manual_y is not None:
+                                    port.manual_y += ddy2
+            self._update_connections()
             # Alignment guides based on wire center
             if connection.free_points:
                 avg_x = sum(p[0] for p in connection.free_points) / len(connection.free_points)
@@ -1800,7 +1855,7 @@ class DiagramApp:
         if mode == "mid":
             raw_mid = event.x - self._drag_wire["offset"]
             connection.manual_mid_x = self._snap_to_step(raw_mid, self.MID_STEP)
-            self._draw_point_alignment_guides(connection.manual_mid_x, event.y)
+            self._draw_single_axis_guide(connection.manual_mid_x, "x")
             if not connection.src or not connection.dst:
                 return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
@@ -1815,7 +1870,7 @@ class DiagramApp:
         if mode == "mid_y":
             raw_mid = event.y - self._drag_wire["offset"]
             connection.manual_mid_y = self._snap_to_step(raw_mid, self.MID_STEP)
-            self._draw_point_alignment_guides(event.x, connection.manual_mid_y)
+            self._draw_single_axis_guide(connection.manual_mid_y, "y")
             if not connection.src or not connection.dst:
                 return
             src_id = self._get_port_canvas_id(connection.src[0], connection.src[1], "out")
@@ -1835,6 +1890,9 @@ class DiagramApp:
             if not node or not port:
                 return
             self._move_port(node, port, event.x, event.y)
+            if port.canvas_id:
+                ppx, ppy = self._port_center(port.canvas_id)
+                self._draw_point_alignment_guides(ppx, ppy)
             seg_dir = self._drag_wire.get("seg_dir")
             if seg_dir and connection.waypoints and port.canvas_id:
                 px, py = self._port_center(port.canvas_id)
@@ -1855,14 +1913,12 @@ class DiagramApp:
                 new_y = self._snap_to_step(event.y - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (points[seg_idx][0], new_y)
                 points[seg_idx + 1] = (points[seg_idx + 1][0], new_y)
-                mid_x = (points[seg_idx][0] + points[seg_idx + 1][0]) / 2
-                self._draw_point_alignment_guides(mid_x, new_y)
+                self._draw_single_axis_guide(new_y, "y")
             else:
                 new_x = self._snap_to_step(event.x - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (new_x, points[seg_idx][1])
                 points[seg_idx + 1] = (new_x, points[seg_idx + 1][1])
-                mid_y = (points[seg_idx][1] + points[seg_idx + 1][1]) / 2
-                self._draw_point_alignment_guides(new_x, mid_y)
+                self._draw_single_axis_guide(new_x, "x")
             connection.waypoints = list(points[1:-1])
             coords = [c for p in points for c in p]
             self.canvas.coords(connection.line_id, *coords)
@@ -1924,6 +1980,7 @@ class DiagramApp:
             "connect": "connect",
             "create_port": "create port",
             "delete_port": "delete port",
+            "move_port": "move port",
             "create_wire": "create wire",
             "wire_port": "wire port",
         }
@@ -2107,11 +2164,41 @@ class DiagramApp:
                     )
                     self._align_guides.append(gid)
 
+    def _draw_single_axis_guide(self, value: float, axis: str):
+        """Draw alignment guide for a single axis: 'x' for vertical line, 'y' for horizontal line."""
+        self._clear_alignment_guides()
+        threshold = self._align_threshold
+        guide_color = "#4A90D9"
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        drawn = set()
+        for node in self.nodes.values():
+            if axis == "y":
+                refs = [node.y, node.y + node.height / 2, node.y + node.height]
+                for r in refs:
+                    if abs(value - r) < threshold and r not in drawn:
+                        drawn.add(r)
+                        gid = self.canvas.create_line(
+                            0, r, canvas_w, r,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                        self._align_guides.append(gid)
+            else:
+                refs = [node.x, node.x + node.width / 2, node.x + node.width]
+                for r in refs:
+                    if abs(value - r) < threshold and r not in drawn:
+                        drawn.add(r)
+                        gid = self.canvas.create_line(
+                            r, 0, r, canvas_h,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                        self._align_guides.append(gid)
+
     def _handle_escape(self):
         if self._delete_mode:
             self._toggle_delete_mode()
             return
-        if self._mode in ("connect", "create_port", "delete_port"):
+        if self._mode in ("connect", "create_port", "delete_port", "move_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
@@ -2282,7 +2369,7 @@ class DiagramApp:
             if self._mode == "wire_port":
                 self._exit_wire_port_mode()
                 return
-            if self._mode in ("connect", "create_port", "delete_port"):
+            if self._mode in ("connect", "create_port", "delete_port", "move_port"):
                 self._reset_port_mode()
             if self._mode == "create_wire":
                 self._reset_create_wire_mode()
@@ -2511,7 +2598,7 @@ class DiagramApp:
         if self._mode == "delete_port":
             self._handle_delete_port_click(event)
             return
-        if self._mode == "normal":
+        if self._mode == "move_port":
             item = self.canvas.find_withtag("current")
             if not item:
                 return
@@ -2839,7 +2926,7 @@ class DiagramApp:
         if self._mode == "connect":
             self._reset_connect_mode()
             return
-        if self._mode in ("create_port", "delete_port"):
+        if self._mode in ("create_port", "delete_port", "move_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
@@ -2861,7 +2948,7 @@ class DiagramApp:
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
             return
-        if self._mode in ("connect", "create_port", "delete_port"):
+        if self._mode in ("connect", "create_port", "delete_port", "move_port"):
             self._reset_port_mode()
         wire_style = self._open_wire_style_dialog(
             "CREATE WIRE",
@@ -3053,7 +3140,7 @@ class DiagramApp:
             self._delete_mode = False
             self._mode = "normal"
             return
-        if self._mode in ("connect", "create_port", "delete_port"):
+        if self._mode in ("connect", "create_port", "delete_port", "move_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
@@ -3237,7 +3324,7 @@ class DiagramApp:
             if self._mode == "wire_port":
                 self._exit_wire_port_mode()
                 return
-            if self._mode in ("connect", "create_port", "delete_port"):
+            if self._mode in ("connect", "create_port", "delete_port", "move_port"):
                 self._reset_port_mode()
             if self._mode == "create_wire":
                 self._reset_create_wire_mode()
@@ -3245,7 +3332,7 @@ class DiagramApp:
             return
         if not self._active_node_name and not self._selected_wire:
             return
-        if self._mode in ("connect", "delete_port"):
+        if self._mode in ("connect", "delete_port", "move_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
@@ -3259,7 +3346,7 @@ class DiagramApp:
                     if port.side in ("left", "right"):
                         port.manual_y = current_y
             self._outline_backup.setdefault(node.name, node.outline_color)
-            node.outline_color = "#4A90D9"
+            node.outline_color = "blue"
             node.resize_enabled = True
             self._redraw_node(node)
         else:
@@ -3279,7 +3366,7 @@ class DiagramApp:
             return
         if not self._active_node_name:
             return
-        if self._mode in ("connect", "create_port"):
+        if self._mode in ("connect", "create_port", "move_port"):
             self._reset_port_mode()
         if self._mode == "create_wire":
             self._reset_create_wire_mode()
@@ -3290,6 +3377,31 @@ class DiagramApp:
             node.resize_enabled = True
             for port in node.inputs + node.outputs:
                 self._set_port_color(port, "red")
+        else:
+            self._mode = "normal"
+
+    def _toggle_move_port_mode(self):
+        if self._mode == "move_port":
+            self._reset_port_mode()
+            return
+        if not self._active_node_name:
+            return
+        if self._mode in ("connect", "create_port", "delete_port"):
+            self._reset_port_mode()
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
+        self._mode = "move_port"
+        node = self.nodes.get(self._active_node_name)
+        if node and node.kind == "BLOCK":
+            self._outline_backup.setdefault(node.name, node.outline_color)
+            node.resize_enabled = True
+            for port in node.inputs + node.outputs:
+                if port.canvas_id:
+                    _, current_y = self._port_center(port.canvas_id)
+                    if port.side in ("left", "right"):
+                        port.manual_y = current_y
+                self._set_port_color(port, "blue")
+            self._redraw_node(node)
         else:
             self._mode = "normal"
 
@@ -3442,6 +3554,14 @@ class DiagramApp:
                 node.resize_enabled = False
                 node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
                 self._redraw_node(node)
+        if self._mode == "move_port" and self._active_node_name:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                for port in node.inputs + node.outputs:
+                    self._set_port_color(port, "black")
+                node.resize_enabled = False
+                node.outline_color = self._outline_backup.pop(node.name, node.outline_color)
+                self._redraw_node(node)
         self._pending_port_node_select = False
         self._mode = "normal"
 
@@ -3486,11 +3606,17 @@ class DiagramApp:
         px, py = self._nearest_point_on_polyline(coords, event.x, event.y)
         if self._distance_squared(px, py, event.x, event.y) > (6.0 ** 2):
             return
-        self._create_junction_at(px, py)
+        seg_dir = self._segment_direction_at(coords, px, py)
+        # Port side perpendicular to the wire segment
+        if seg_dir == "horizontal":
+            port_side = "top"
+        else:
+            port_side = "left"
+        self._create_junction_at(px, py, port_side=port_side)
         self._exit_wire_port_mode()
 
     def _find_parent_wire(self, node: Node) -> Connection | None:
-        """Find the free-point wire that a PORT node sits on."""
+        """Find the wire (free-point or connected) that a PORT node sits on."""
         if node.kind != "PORT":
             return None
         center_x = node.x + node.width / 2
@@ -3498,8 +3624,6 @@ class DiagramApp:
         best_conn = None
         best_dist = float("inf")
         for conn in self.connections:
-            if not conn.free_points:
-                continue
             coords = self._connection_line_coords(conn)
             if not coords or len(coords) < 4:
                 continue
@@ -3512,7 +3636,24 @@ class DiagramApp:
             return best_conn
         return None
 
-    def _create_junction_at(self, x: float, y: float):
+    def _segment_direction_at(self, coords: list[float], px: float, py: float) -> str:
+        """Return 'horizontal' or 'vertical' for the segment nearest to (px, py)."""
+        best_dir = "horizontal"
+        best_dist = float("inf")
+        for i in range(0, len(coords) - 2, 2):
+            ax, ay = coords[i], coords[i + 1]
+            bx, by = coords[i + 2], coords[i + 3]
+            cx, cy = self._nearest_point_on_segment(ax, ay, bx, by, px, py)
+            d = self._distance_squared(cx, cy, px, py)
+            if d < best_dist:
+                best_dist = d
+                if abs(ax - bx) < 1:
+                    best_dir = "vertical"
+                else:
+                    best_dir = "horizontal"
+        return best_dir
+
+    def _create_junction_at(self, x: float, y: float, port_side: str = "left"):
         name = self._unique_node_name("Junction")
         size = 12
         node = Node(
@@ -3520,7 +3661,7 @@ class DiagramApp:
             kind="PORT",
             inputs=[],
             outputs=[],
-            x=int(x),
+            x=int(x - size / 2),
             y=int(y - size / 2),
             width=size,
             height=size,
@@ -3535,8 +3676,9 @@ class DiagramApp:
             label_font_family="Arial",
             label_font_weight="normal",
         )
-        port = Port(name="p1", kind="io", side="left", offset=0.5)
-        port.manual_y = y
+        port = Port(name="p1", kind="io", side=port_side, offset=0.5)
+        if port_side in ("left", "right"):
+            port.manual_y = y
         node.inputs = [port]
         self.nodes[name] = node
         self._draw_node(node)
@@ -3551,7 +3693,7 @@ class DiagramApp:
             current_width = int(float(self.canvas.itemcget(connection.line_id, "width") or 0))
             current_color = self.canvas.itemcget(connection.line_id, "fill") or connection.line_color
             self._wire_port_backup[connection.line_id] = (current_width, current_color)
-        self.canvas.itemconfig(connection.line_id, width=max(6, self._wire_width(connection) + 3), fill="#4A90D9")
+        self.canvas.itemconfig(connection.line_id, width=max(6, self._wire_width(connection) + 3), fill="blue")
         self._mode = "wire_port"
 
     def _exit_wire_port_mode(self):
@@ -3916,6 +4058,7 @@ class DiagramApp:
             "- CREATE WIRE (Ctrl+W): draw a straight wire by clicking two points.\n"
             "- CREATE PORT (A): add a port on the selected block edge.\n"
             "- DELETE PORT (Ctrl+A): remove a port on the selected block.\n"
+            "- MOVE PORT (Shift+A): drag ports to reposition on the selected block.\n"
             "- SHOW/HIDE PORT (`): toggle port visibility.\n"
             "- BRING FRONT (F): move block forward.\n"
             "- SEND BACK (B): move block backward.\n"
