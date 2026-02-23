@@ -835,7 +835,7 @@ class DiagramApp:
             self._update_wire_preview(cx, cy)
 
     def _snap_junctions_to_wires(self):
-        """Snap all PORT (junction) nodes to the nearest point on their parent wire."""
+        """Snap all PORT (junction) nodes so their port circle sits on the parent wire."""
         for node in list(self.nodes.values()):
             if node.kind != "PORT":
                 continue
@@ -845,12 +845,13 @@ class DiagramApp:
             coords = self._connection_line_coords(parent)
             if not coords or len(coords) < 4:
                 continue
-            cx = node.x + node.width / 2
-            cy = node.y + node.height / 2
-            px, py = self._nearest_point_on_polyline(coords, cx, cy)
-            half = node.width / 2
-            new_x = int(round(px - half))
-            new_y = int(round(py - half))
+            # Use port position as reference, not node center
+            ref_x, ref_y = self._junction_port_xy(node)
+            px, py = self._nearest_point_on_polyline(coords, ref_x, ref_y)
+            # Compute new node position so port is at (px, py)
+            ports = node.inputs + node.outputs
+            port_side = ports[0].side if ports else "left"
+            new_x, new_y = self._junction_node_pos(px, py, port_side, node.width)
             ddx = new_x - node.x
             ddy = new_y - node.y
             if ddx == 0 and ddy == 0:
@@ -894,13 +895,13 @@ class DiagramApp:
         # PORT nodes: constrain movement along parent wire
         if node.kind == "PORT":
             parent_wire = self._find_parent_wire(node)
-            if parent_wire and parent_wire.free_points:
+            if parent_wire:
                 coords = self._connection_line_coords(parent_wire)
                 if coords and len(coords) >= 4:
                     px, py = self._nearest_point_on_polyline(coords, cx, cy)
-                    half = node.width / 2
-                    new_x = int(round(px - half))
-                    new_y = int(round(py - half))
+                    ports = node.inputs + node.outputs
+                    port_side = ports[0].side if ports else "left"
+                    new_x, new_y = self._junction_node_pos(px, py, port_side, node.width)
                     ddx = new_x - node.x
                     ddy = new_y - node.y
                     if ddx == 0 and ddy == 0:
@@ -1005,6 +1006,10 @@ class DiagramApp:
         for p, my, off in saved:
             p.manual_y = my
             p.offset = off
+            if p.canvas_id:
+                px, py = self._port_position(node, p)
+                r = self.PORT_RADIUS
+                self.canvas.coords(p.canvas_id, px - r, py - r, px + r, py + r)
         self._update_connections()
 
     def _on_resize_motion(self, event):
@@ -1830,12 +1835,11 @@ class DiagramApp:
                 if node.kind == "PORT" and self._find_parent_wire(node) is connection:
                     coords = self._connection_line_coords(connection)
                     if coords and len(coords) >= 4:
-                        ncx = node.x + node.width / 2
-                        ncy = node.y + node.height / 2
-                        px, py = self._nearest_point_on_polyline(coords, ncx, ncy)
-                        half = node.width / 2
-                        new_x = int(round(px - half))
-                        new_y = int(round(py - half))
+                        ref_x, ref_y = self._junction_port_xy(node)
+                        px, py = self._nearest_point_on_polyline(coords, ref_x, ref_y)
+                        ports = node.inputs + node.outputs
+                        port_side = ports[0].side if ports else "left"
+                        new_x, new_y = self._junction_node_pos(px, py, port_side, node.width)
                         ddx2 = new_x - node.x
                         ddy2 = new_y - node.y
                         if ddx2 != 0 or ddy2 != 0:
@@ -1929,6 +1933,8 @@ class DiagramApp:
     def _on_wire_release(self, _event):
         if self._drag_wire["connection"]:
             self._simplify_waypoints(self._drag_wire["connection"])
+            self._update_connections()
+            self._snap_junctions_to_wires()
             self._update_connections()
             self._record_history()
         self._drag_wire["connection"] = None
@@ -2115,8 +2121,13 @@ class DiagramApp:
         for other in self.nodes.values():
             if other.name == moving_node.name:
                 continue
-            ref_xs = [other.x, other.x + other.width / 2, other.x + other.width]
-            ref_ys = [other.y, other.y + other.height / 2, other.y + other.height]
+            if other.kind == "PORT":
+                cx, cy = self._junction_port_xy(other)
+                ref_xs = [cx]
+                ref_ys = [cy]
+            else:
+                ref_xs = [other.x, other.x + other.width / 2, other.x + other.width]
+                ref_ys = [other.y, other.y + other.height / 2, other.y + other.height]
             for rx in ref_xs:
                 for mx in [mx_left, mx_cx, mx_right]:
                     if abs(mx - rx) < 1 and rx not in drawn_x:
@@ -2135,6 +2146,25 @@ class DiagramApp:
                             fill=guide_color, dash=(4, 4), width=1,
                         )
                         self._align_guides.append(gid)
+        # Wire free_points as references for wire-to-wire guides
+        for conn in self.connections:
+            for fp_x, fp_y in conn.free_points:
+                for mx in [mx_left, mx_cx, mx_right]:
+                    if abs(mx - fp_x) < 1 and fp_x not in drawn_x:
+                        drawn_x.add(fp_x)
+                        gid = self.canvas.create_line(
+                            fp_x, 0, fp_x, canvas_h,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                        self._align_guides.append(gid)
+                for my in [my_top, my_cy, my_bottom]:
+                    if abs(my - fp_y) < 1 and fp_y not in drawn_y:
+                        drawn_y.add(fp_y)
+                        gid = self.canvas.create_line(
+                            0, fp_y, canvas_w, fp_y,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                        self._align_guides.append(gid)
 
     def _draw_point_alignment_guides(self, px: float, py: float):
         self._clear_alignment_guides()
@@ -2145,8 +2175,13 @@ class DiagramApp:
         drawn_x = set()
         drawn_y = set()
         for node in self.nodes.values():
-            ref_xs = [node.x, node.x + node.width / 2, node.x + node.width]
-            ref_ys = [node.y, node.y + node.height / 2, node.y + node.height]
+            if node.kind == "PORT":
+                cx, cy = self._junction_port_xy(node)
+                ref_xs = [cx]
+                ref_ys = [cy]
+            else:
+                ref_xs = [node.x, node.x + node.width / 2, node.x + node.width]
+                ref_ys = [node.y, node.y + node.height / 2, node.y + node.height]
             for rx in ref_xs:
                 if abs(px - rx) < threshold and rx not in drawn_x:
                     drawn_x.add(rx)
@@ -2163,6 +2198,23 @@ class DiagramApp:
                         fill=guide_color, dash=(4, 4), width=1,
                     )
                     self._align_guides.append(gid)
+        # Wire free_points as references for wire-to-wire guides
+        for conn in self.connections:
+            for fp_x, fp_y in conn.free_points:
+                if abs(px - fp_x) < threshold and fp_x not in drawn_x:
+                    drawn_x.add(fp_x)
+                    gid = self.canvas.create_line(
+                        fp_x, 0, fp_x, canvas_h,
+                        fill=guide_color, dash=(4, 4), width=1,
+                    )
+                    self._align_guides.append(gid)
+                if abs(py - fp_y) < threshold and fp_y not in drawn_y:
+                    drawn_y.add(fp_y)
+                    gid = self.canvas.create_line(
+                        0, fp_y, canvas_w, fp_y,
+                        fill=guide_color, dash=(4, 4), width=1,
+                    )
+                    self._align_guides.append(gid)
 
     def _draw_single_axis_guide(self, value: float, axis: str):
         """Draw alignment guide for a single axis: 'x' for vertical line, 'y' for horizontal line."""
@@ -2173,26 +2225,44 @@ class DiagramApp:
         canvas_h = self.canvas.winfo_height()
         drawn = set()
         for node in self.nodes.values():
-            if axis == "y":
+            if node.kind == "PORT":
+                cx, cy = self._junction_port_xy(node)
+                refs = [cy] if axis == "y" else [cx]
+            elif axis == "y":
                 refs = [node.y, node.y + node.height / 2, node.y + node.height]
-                for r in refs:
-                    if abs(value - r) < threshold and r not in drawn:
-                        drawn.add(r)
+            else:
+                refs = [node.x, node.x + node.width / 2, node.x + node.width]
+            for r in refs:
+                if abs(value - r) < threshold and r not in drawn:
+                    drawn.add(r)
+                    if axis == "y":
                         gid = self.canvas.create_line(
                             0, r, canvas_w, r,
                             fill=guide_color, dash=(4, 4), width=1,
                         )
-                        self._align_guides.append(gid)
-            else:
-                refs = [node.x, node.x + node.width / 2, node.x + node.width]
-                for r in refs:
-                    if abs(value - r) < threshold and r not in drawn:
-                        drawn.add(r)
+                    else:
                         gid = self.canvas.create_line(
                             r, 0, r, canvas_h,
                             fill=guide_color, dash=(4, 4), width=1,
                         )
-                        self._align_guides.append(gid)
+                    self._align_guides.append(gid)
+        # Wire free_points as references for wire-to-wire guides
+        for conn in self.connections:
+            for fp_x, fp_y in conn.free_points:
+                r = fp_y if axis == "y" else fp_x
+                if abs(value - r) < threshold and r not in drawn:
+                    drawn.add(r)
+                    if axis == "y":
+                        gid = self.canvas.create_line(
+                            0, r, canvas_w, r,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                    else:
+                        gid = self.canvas.create_line(
+                            r, 0, r, canvas_h,
+                            fill=guide_color, dash=(4, 4), width=1,
+                        )
+                    self._align_guides.append(gid)
 
     def _handle_escape(self):
         if self._delete_mode:
@@ -3615,20 +3685,26 @@ class DiagramApp:
         self._create_junction_at(px, py, port_side=port_side)
         self._exit_wire_port_mode()
 
+    def _junction_port_xy(self, node: Node) -> tuple[float, float]:
+        """Return the port circle center position of a PORT (junction) node."""
+        ports = node.inputs + node.outputs
+        if ports:
+            return self._port_position(node, ports[0])
+        return node.x + node.width / 2, node.y + node.height / 2
+
     def _find_parent_wire(self, node: Node) -> Connection | None:
         """Find the wire (free-point or connected) that a PORT node sits on."""
         if node.kind != "PORT":
             return None
-        center_x = node.x + node.width / 2
-        center_y = node.y + node.height / 2
+        ref_x, ref_y = self._junction_port_xy(node)
         best_conn = None
         best_dist = float("inf")
         for conn in self.connections:
             coords = self._connection_line_coords(conn)
             if not coords or len(coords) < 4:
                 continue
-            px, py = self._nearest_point_on_polyline(coords, center_x, center_y)
-            dist = self._distance_squared(px, py, center_x, center_y)
+            px, py = self._nearest_point_on_polyline(coords, ref_x, ref_y)
+            dist = self._distance_squared(px, py, ref_x, ref_y)
             if dist < best_dist:
                 best_dist = dist
                 best_conn = conn
@@ -3653,16 +3729,29 @@ class DiagramApp:
                     best_dir = "horizontal"
         return best_dir
 
+    def _junction_node_pos(self, px: float, py: float, port_side: str, size: int = 12) -> tuple[int, int]:
+        """Compute junction node (x, y) so that the port circle center is at (px, py)."""
+        half = size / 2
+        if port_side == "top":
+            return int(px - half), int(py)
+        elif port_side == "bottom":
+            return int(px - half), int(py - size)
+        elif port_side == "left":
+            return int(px), int(py - half)
+        else:  # right
+            return int(px - size), int(py - half)
+
     def _create_junction_at(self, x: float, y: float, port_side: str = "left"):
         name = self._unique_node_name("Junction")
         size = 12
+        nx, ny = self._junction_node_pos(x, y, port_side, size)
         node = Node(
             name=name,
             kind="PORT",
             inputs=[],
             outputs=[],
-            x=int(x - size / 2),
-            y=int(y - size / 2),
+            x=nx,
+            y=ny,
             width=size,
             height=size,
             base_height=size,
