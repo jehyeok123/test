@@ -918,6 +918,11 @@ class DiagramApp:
         if self._multi_select["dragging"]:
             self._on_multi_drag(event)
             return
+        # Don't draw selection rect if a node/wire drag is active
+        if self._drag_data.get("node") or self._drag_wire.get("connection"):
+            return
+        if self._label_drag_data.get("connection"):
+            return
         cx, cy = self._cx(event), self._cy(event)
         sx, sy = self._multi_select["start_x"], self._multi_select["start_y"]
         if self._multi_select["rect_id"]:
@@ -934,6 +939,10 @@ class DiagramApp:
         if self._multi_select["dragging"]:
             self._multi_select["dragging"] = False
             self._record_history()
+            return
+        # If no selection rectangle was drawn, just reset
+        if not self._multi_select["rect_id"] and not self._multi_select["nodes"]:
+            self._multi_select["active"] = False
             return
         cx, cy = self._cx(event), self._cy(event)
         sx, sy = self._multi_select["start_x"], self._multi_select["start_y"]
@@ -1047,6 +1056,30 @@ class DiagramApp:
             self.canvas.move(hid, sdx, sdy)
         self._update_connections()
 
+    def _find_junctions_on_segment(self, connection: Connection, ax: float, ay: float,
+                                     bx: float, by: float, direction: str) -> list[str]:
+        """Find PORT junction node names sitting on the given segment of a connection."""
+        result = []
+        tol = 8
+        min_x, max_x = min(ax, bx), max(ax, bx)
+        min_y, max_y = min(ay, by), max(ay, by)
+        # Check junction_ports first
+        jp_names = {jp.get("node") for jp in connection.junction_ports}
+        for jnode in self.nodes.values():
+            if jnode.kind != "PORT":
+                continue
+            ref_x, ref_y = self._junction_port_xy(jnode)
+            on_seg = False
+            if direction == "h":
+                if abs(ref_y - ay) < tol and min_x - tol <= ref_x <= max_x + tol:
+                    on_seg = True
+            else:
+                if abs(ref_x - ax) < tol and min_y - tol <= ref_y <= max_y + tol:
+                    on_seg = True
+            if on_seg and (jnode.name in jp_names or self._find_parent_wire(jnode) is connection):
+                result.append(jnode.name)
+        return result
+
     def _snap_junctions_to_wires(self):
         """Snap all PORT (junction) nodes so their port circle sits on the parent wire."""
         for node in list(self.nodes.values()):
@@ -1118,6 +1151,11 @@ class DiagramApp:
                 coords = self._connection_line_coords(parent_wire)
                 if coords and len(coords) >= 4:
                     px, py = self._nearest_point_on_polyline(coords, cx, cy)
+                    # Snap to grid for consistent movement granularity
+                    px = self._snap_value(px)
+                    py = self._snap_value(py)
+                    # Re-project snapped point onto wire
+                    px, py = self._nearest_point_on_polyline(coords, px, py)
                     ports = node.inputs + node.outputs
                     port_side = ports[0].side if ports else "left"
                     new_x, new_y = self._junction_node_pos(px, py, port_side, node.width)
@@ -1903,6 +1941,9 @@ class DiagramApp:
                     self._drag_wire["offset"] = event.y - ay
                     self._drag_wire["seg_index"] = i
                     self._drag_wire["points"] = points
+                    # Find PORT junctions on this segment at drag start
+                    self._drag_wire["seg_junctions"] = self._find_junctions_on_segment(
+                        connection, ax, ay, bx, by, "h")
                     return
                 if ax == bx and self._near_vertical_segment(event.x, event.y, ax, ay, by):
                     if is_first and connection.src:
@@ -1926,6 +1967,9 @@ class DiagramApp:
                     self._drag_wire["offset"] = event.x - ax
                     self._drag_wire["seg_index"] = i
                     self._drag_wire["points"] = points
+                    # Find PORT junctions on this segment at drag start
+                    self._drag_wire["seg_junctions"] = self._find_junctions_on_segment(
+                        connection, ax, ay, bx, by, "v")
                     return
             return
         if len(coords) == 6 and not connection.waypoints:
@@ -2200,29 +2244,19 @@ class DiagramApp:
             self.canvas.coords(connection.line_id, *coords)
             if connection.label_id:
                 self._update_label(connection, coords)
-            # Move PORT junctions that sit on the dragged segment
+            # Move PORT junctions pre-identified at drag start
             if seg_dx != 0 or seg_dy != 0:
-                seg_ax, seg_ay = min(old_a[0], old_b[0]), min(old_a[1], old_b[1])
-                seg_bx, seg_by = max(old_a[0], old_b[0]), max(old_a[1], old_b[1])
-                for jnode in list(self.nodes.values()):
-                    if jnode.kind != "PORT":
+                seg_junctions = self._drag_wire.get("seg_junctions", [])
+                for jname in seg_junctions:
+                    jnode = self.nodes.get(jname)
+                    if not jnode:
                         continue
-                    ref_x, ref_y = self._junction_port_xy(jnode)
-                    # Check if port was on or near the dragged segment
-                    on_seg = False
-                    if mode == "wp_h":
-                        if abs(ref_y - old_a[1]) < 3 and seg_ax - 3 <= ref_x <= seg_bx + 3:
-                            on_seg = True
-                    else:
-                        if abs(ref_x - old_a[0]) < 3 and seg_ay - 3 <= ref_y <= seg_by + 3:
-                            on_seg = True
-                    if on_seg:
-                        self.canvas.move(f"node:{jnode.name}", seg_dx, seg_dy)
-                        jnode.x += seg_dx
-                        jnode.y += seg_dy
-                        for jp in jnode.inputs + jnode.outputs:
-                            if jp.manual_y is not None:
-                                jp.manual_y += seg_dy
+                    self.canvas.move(f"node:{jname}", seg_dx, seg_dy)
+                    jnode.x += seg_dx
+                    jnode.y += seg_dy
+                    for jp in jnode.inputs + jnode.outputs:
+                        if jp.manual_y is not None:
+                            jp.manual_y += seg_dy
             self._update_connections()
             return
 
@@ -2243,6 +2277,7 @@ class DiagramApp:
         self._drag_wire.pop("seg_index", None)
         self._drag_wire.pop("points", None)
         self._drag_wire.pop("seg_dir", None)
+        self._drag_wire.pop("seg_junctions", None)
         self._drag_wire.pop("src_node", None)
         self._drag_wire.pop("src_port", None)
         self._drag_wire.pop("dst_node", None)
@@ -3567,18 +3602,35 @@ class DiagramApp:
         self._wire_preview_id = None
 
     def _toggle_delete_mode(self):
+        # Exit delete blink mode if active
+        if self._delete_mode:
+            self._stop_delete_blink()
+            self._delete_mode = False
+            self._mode = "normal"
+            self._update_status_bar()
+            return
+        # Exit any special mode first → go to normal
+        if self._mode in ("connect", "create_port", "delete_port", "move_port"):
+            self._reset_port_mode()
+            self._update_status_bar()
+            return
+        if self._mode == "create_wire":
+            self._reset_create_wire_mode()
+            self._update_status_bar()
+            return
+        if self._mode == "wire_port":
+            self._exit_wire_port_mode()
+            self._update_status_bar()
+            return
         # Multi-select delete: delete all selected items immediately
         if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
-            # Remove highlights first
             for hid in self._multi_select["highlights"]:
                 self.canvas.delete(hid)
             self._multi_select["highlights"] = []
-            # Delete selected wires/labels
             for conn in list(self._multi_select["wires"]):
                 self._remove_connection(conn, record=False)
             for conn in list(self._multi_select["labels"]):
                 self._remove_connection(conn, record=False)
-            # Delete selected nodes
             for name in list(self._multi_select["nodes"]):
                 node = self.nodes.get(name)
                 if node:
@@ -3594,7 +3646,7 @@ class DiagramApp:
             self._update_status_bar()
             return
         # Single selected node delete
-        if self._active_node_name and self._mode == "normal" and not self._delete_mode:
+        if self._active_node_name and not self._delete_mode:
             node = self.nodes.get(self._active_node_name)
             if node:
                 self._unhighlight_node()
@@ -3603,21 +3655,13 @@ class DiagramApp:
                 self._update_status_bar()
                 return
         # Single selected wire delete
-        if self._selected_wire and self._mode == "normal" and not self._delete_mode:
+        if self._selected_wire and not self._delete_mode:
             conn = self._selected_wire
             self._deselect_wire()
             self._remove_connection(conn)
             self._update_status_bar()
             return
-        if self._delete_mode:
-            self._stop_delete_blink()
-            self._delete_mode = False
-            self._mode = "normal"
-            return
-        if self._mode in ("connect", "create_port", "delete_port", "move_port"):
-            self._reset_port_mode()
-        if self._mode == "create_wire":
-            self._reset_create_wire_mode()
+        # Nothing selected: enter delete blink mode
         self._delete_mode = True
         self._delete_blink_on = False
         self._capture_delete_colors()
