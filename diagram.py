@@ -68,6 +68,7 @@ class Connection:
     waypoints: list[tuple[float, float]] = field(default_factory=list)
     free_points: list[tuple[float, float]] = field(default_factory=list)
     show_arrow: bool = True
+    junction_ports: list[dict] = field(default_factory=list)
 
 
 class DiagramApp:
@@ -1822,8 +1823,28 @@ class DiagramApp:
         if not coords:
             return
         if len(coords) == 4:
-            if not self._near_horizontal_segment(event.x, event.y, coords[0], coords[2], coords[1]):
+            # Check proximity to the single segment (horizontal or vertical)
+            on_h = self._near_horizontal_segment(event.x, event.y, coords[0], coords[2], coords[1])
+            on_v = self._near_vertical_segment(event.x, event.y, coords[0], coords[1], coords[3])
+            if not on_h and not on_v:
                 return
+            # Straight wire with both endpoints and no waypoints: move both ports
+            if connection.src and connection.dst and not connection.waypoints:
+                src_info = self._find_port(connection.src[0], connection.src[1], "out")
+                dst_info = self._find_port(connection.dst[0], connection.dst[1], "in")
+                if src_info and dst_info:
+                    src_node, src_port = src_info
+                    dst_node, dst_port = dst_info
+                    if not src_node.resize_enabled and not dst_node.resize_enabled:
+                        self._drag_wire["connection"] = connection
+                        self._drag_wire["mode"] = "both_ports"
+                        self._drag_wire["src_node"] = src_node
+                        self._drag_wire["src_port"] = src_port
+                        self._drag_wire["dst_node"] = dst_node
+                        self._drag_wire["dst_port"] = dst_port
+                        self._drag_wire["x"] = event.x
+                        self._drag_wire["y"] = event.y
+                        return
             if connection.dst:
                 port_info = self._find_port(connection.dst[0], connection.dst[1], "in")
                 if not port_info:
@@ -2054,35 +2075,28 @@ class DiagramApp:
             coords = self._connection_line_coords(connection)
             if coords and connection.line_id:
                 self.canvas.coords(connection.line_id, *coords)
-            # Move PORT nodes on this wire
+            # Move PORT nodes registered on this wire by same delta
+            for jp in connection.junction_ports:
+                jnode = self.nodes.get(jp.get("node"))
+                if not jnode:
+                    continue
+                self.canvas.move(f"node:{jnode.name}", snapped_dx, snapped_dy)
+                jnode.x += snapped_dx
+                jnode.y += snapped_dy
+                for port in jnode.inputs + jnode.outputs:
+                    if port.manual_y is not None:
+                        port.manual_y += snapped_dy
+            # Also move any PORT not in junction_ports but nearby (fallback)
+            jp_names = {jp.get("node") for jp in connection.junction_ports}
             for node in list(self.nodes.values()):
-                if node.kind == "PORT" and self._find_parent_wire(node) is connection:
-                    self.canvas.move(f"node:{node.name}", snapped_dx, snapped_dy)
-                    node.x += snapped_dx
-                    node.y += snapped_dy
-                    for port in node.inputs + node.outputs:
-                        if port.manual_y is not None:
-                            port.manual_y += snapped_dy
-            self._update_connections()
-            # Re-snap PORT nodes to wire to prevent drift
-            for node in list(self.nodes.values()):
-                if node.kind == "PORT" and self._find_parent_wire(node) is connection:
-                    coords = self._connection_line_coords(connection)
-                    if coords and len(coords) >= 4:
-                        ref_x, ref_y = self._junction_port_xy(node)
-                        px, py = self._nearest_point_on_polyline(coords, ref_x, ref_y)
-                        ports = node.inputs + node.outputs
-                        port_side = ports[0].side if ports else "left"
-                        new_x, new_y = self._junction_node_pos(px, py, port_side, node.width)
-                        ddx2 = new_x - node.x
-                        ddy2 = new_y - node.y
-                        if ddx2 != 0 or ddy2 != 0:
-                            self.canvas.move(f"node:{node.name}", ddx2, ddy2)
-                            node.x += ddx2
-                            node.y += ddy2
-                            for port in node.inputs + node.outputs:
-                                if port.manual_y is not None:
-                                    port.manual_y += ddy2
+                if node.kind == "PORT" and node.name not in jp_names:
+                    if self._find_parent_wire(node) is connection:
+                        self.canvas.move(f"node:{node.name}", snapped_dx, snapped_dy)
+                        node.x += snapped_dx
+                        node.y += snapped_dy
+                        for port in node.inputs + node.outputs:
+                            if port.manual_y is not None:
+                                port.manual_y += snapped_dy
             self._update_connections()
             # Alignment guides based on wire center
             if connection.free_points:
@@ -2120,6 +2134,25 @@ class DiagramApp:
             coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             self.canvas.coords(connection.line_id, *coords)
             return
+        if mode == "both_ports":
+            if self._mode != "normal":
+                return
+            dx = event.x - self._drag_wire["x"]
+            dy = event.y - self._drag_wire["y"]
+            sdx = self._snap_value(dx) if abs(dx) >= self.GRID_STEP / 2 else 0
+            sdy = self._snap_value(dy) if abs(dy) >= self.GRID_STEP / 2 else 0
+            if sdx == 0 and sdy == 0:
+                return
+            self._drag_wire["x"] = event.x
+            self._drag_wire["y"] = event.y
+            for key in ("src", "dst"):
+                n = self._drag_wire.get(f"{key}_node")
+                p = self._drag_wire.get(f"{key}_port")
+                if n and p and p.canvas_id:
+                    cx, cy = self._port_center(p.canvas_id)
+                    self._move_port(n, p, cx + sdx, cy + sdy)
+            self._update_connections()
+            return
         if mode in ("src_port", "dst_port"):
             if self._mode != "normal":
                 return
@@ -2147,40 +2180,49 @@ class DiagramApp:
             points = self._drag_wire.get("points")
             if seg_idx is None or not points:
                 return
+            # Save old segment endpoints to compute delta
+            old_a = points[seg_idx]
+            old_b = points[seg_idx + 1]
             if mode == "wp_h":
                 new_y = self._snap_to_step(event.y - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (points[seg_idx][0], new_y)
                 points[seg_idx + 1] = (points[seg_idx + 1][0], new_y)
                 self._draw_single_axis_guide(new_y, "y")
+                seg_dx, seg_dy = 0, new_y - old_a[1]
             else:
                 new_x = self._snap_to_step(event.x - self._drag_wire["offset"], self.MID_STEP)
                 points[seg_idx] = (new_x, points[seg_idx][1])
                 points[seg_idx + 1] = (new_x, points[seg_idx + 1][1])
                 self._draw_single_axis_guide(new_x, "x")
+                seg_dx, seg_dy = new_x - old_a[0], 0
             connection.waypoints = list(points[1:-1])
             coords = [c for p in points for c in p]
             self.canvas.coords(connection.line_id, *coords)
             if connection.label_id:
                 self._update_label(connection, coords)
-            # Snap PORT junctions on this wire to new positions
-            for jnode in list(self.nodes.values()):
-                if jnode.kind != "PORT":
-                    continue
-                if self._find_parent_wire(jnode) is not connection:
-                    continue
-                ref_x, ref_y = self._junction_port_xy(jnode)
-                npx, npy = self._nearest_point_on_polyline(coords, ref_x, ref_y)
-                jports = jnode.inputs + jnode.outputs
-                jside = jports[0].side if jports else "left"
-                jnx, jny = self._junction_node_pos(npx, npy, jside, jnode.width)
-                jdx, jdy = jnx - jnode.x, jny - jnode.y
-                if jdx != 0 or jdy != 0:
-                    self.canvas.move(f"node:{jnode.name}", jdx, jdy)
-                    jnode.x += jdx
-                    jnode.y += jdy
-                    for jp in jnode.inputs + jnode.outputs:
-                        if jp.manual_y is not None:
-                            jp.manual_y += jdy
+            # Move PORT junctions that sit on the dragged segment
+            if seg_dx != 0 or seg_dy != 0:
+                seg_ax, seg_ay = min(old_a[0], old_b[0]), min(old_a[1], old_b[1])
+                seg_bx, seg_by = max(old_a[0], old_b[0]), max(old_a[1], old_b[1])
+                for jnode in list(self.nodes.values()):
+                    if jnode.kind != "PORT":
+                        continue
+                    ref_x, ref_y = self._junction_port_xy(jnode)
+                    # Check if port was on or near the dragged segment
+                    on_seg = False
+                    if mode == "wp_h":
+                        if abs(ref_y - old_a[1]) < 3 and seg_ax - 3 <= ref_x <= seg_bx + 3:
+                            on_seg = True
+                    else:
+                        if abs(ref_x - old_a[0]) < 3 and seg_ay - 3 <= ref_y <= seg_by + 3:
+                            on_seg = True
+                    if on_seg:
+                        self.canvas.move(f"node:{jnode.name}", seg_dx, seg_dy)
+                        jnode.x += seg_dx
+                        jnode.y += seg_dy
+                        for jp in jnode.inputs + jnode.outputs:
+                            if jp.manual_y is not None:
+                                jp.manual_y += seg_dy
             self._update_connections()
             return
 
@@ -2201,6 +2243,10 @@ class DiagramApp:
         self._drag_wire.pop("seg_index", None)
         self._drag_wire.pop("points", None)
         self._drag_wire.pop("seg_dir", None)
+        self._drag_wire.pop("src_node", None)
+        self._drag_wire.pop("src_port", None)
+        self._drag_wire.pop("dst_node", None)
+        self._drag_wire.pop("dst_port", None)
         self._clear_alignment_guides()
 
     def _on_wire_double_click(self, event):
@@ -2347,7 +2393,12 @@ class DiagramApp:
         lx, ly = self.canvas.coords(connection.label_id)
         connection.label_x = lx
         connection.label_y = ly
-        self._draw_point_alignment_guides(lx, ly)
+        # Use label bbox for alignment guides (left/center/right, top/center/bottom)
+        bbox = self.canvas.bbox(connection.label_id)
+        if bbox:
+            self._draw_label_alignment_guides(bbox)
+        else:
+            self._draw_point_alignment_guides(lx, ly)
 
     def _on_label_release(self, _event):
         # Multi-select drag release is handled by _on_canvas_release
@@ -2416,6 +2467,13 @@ class DiagramApp:
                 for i in range(0, len(coords), 2):
                     ref_xs.append(coords[i])
                     ref_ys.append(coords[i + 1])
+            # Add label bbox edges/center as reference positions
+            if conn.label_id:
+                bbox = self.canvas.bbox(conn.label_id)
+                if bbox:
+                    lx1, ly1, lx2, ly2 = bbox
+                    ref_xs.extend([lx1, (lx1 + lx2) / 2, lx2])
+                    ref_ys.extend([ly1, (ly1 + ly2) / 2, ly2])
         return ref_xs, ref_ys
 
     def _draw_alignment_guides(self, moving_node: Node):
@@ -2484,6 +2542,33 @@ class DiagramApp:
                 else:
                     gid = self.canvas.create_line(r, 0, r, canvas_h, fill=guide_color, dash=(4, 4), width=1)
                 self._align_guides.append(gid)
+
+    def _draw_label_alignment_guides(self, bbox: tuple[int, int, int, int]):
+        """Draw alignment guides using label bbox edges and center."""
+        self._clear_alignment_guides()
+        lx1, ly1, lx2, ly2 = bbox
+        lcx = (lx1 + lx2) / 2
+        lcy = (ly1 + ly2) / 2
+        moving_xs = [lx1, lcx, lx2]
+        moving_ys = [ly1, lcy, ly2]
+        guide_color = "#4A90D9"
+        canvas_w = self.canvas.winfo_width()
+        canvas_h = self.canvas.winfo_height()
+        drawn_x: set[float] = set()
+        drawn_y: set[float] = set()
+        all_rx, all_ry = self._collect_guide_refs()
+        for rx in all_rx:
+            for mx in moving_xs:
+                if abs(mx - rx) < self._align_threshold and rx not in drawn_x:
+                    drawn_x.add(rx)
+                    gid = self.canvas.create_line(rx, 0, rx, canvas_h, fill=guide_color, dash=(4, 4), width=1)
+                    self._align_guides.append(gid)
+        for ry in all_ry:
+            for my in moving_ys:
+                if abs(my - ry) < self._align_threshold and ry not in drawn_y:
+                    drawn_y.add(ry)
+                    gid = self.canvas.create_line(0, ry, canvas_w, ry, fill=guide_color, dash=(4, 4), width=1)
+                    self._align_guides.append(gid)
 
     def _handle_escape(self):
         if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
@@ -2830,6 +2915,59 @@ class DiagramApp:
                 best_dist = dist
                 best_point = (cx, cy)
         return best_point
+
+    @classmethod
+    def _point_ratio_on_polyline(cls, coords: list[float], px: float, py: float) -> float:
+        """Compute the ratio [0..1] of point (px, py) along the polyline."""
+        import math
+        total_len = 0.0
+        seg_lengths = []
+        for i in range(0, len(coords) - 2, 2):
+            x1, y1 = coords[i], coords[i + 1]
+            x2, y2 = coords[i + 2], coords[i + 3]
+            seg_len = math.hypot(x2 - x1, y2 - y1)
+            seg_lengths.append(seg_len)
+            total_len += seg_len
+        if total_len == 0:
+            return 0.0
+        cum = 0.0
+        best_ratio = 0.0
+        best_dist = float("inf")
+        for i, seg_len in enumerate(seg_lengths):
+            x1, y1 = coords[i * 2], coords[i * 2 + 1]
+            x2, y2 = coords[i * 2 + 2], coords[i * 2 + 3]
+            cx, cy = cls._nearest_point_on_segment(x1, y1, x2, y2, px, py)
+            dist = cls._distance_squared(cx, cy, px, py)
+            if dist < best_dist:
+                best_dist = dist
+                d = math.hypot(cx - x1, cy - y1)
+                best_ratio = (cum + d) / total_len
+            cum += seg_len
+        return max(0.0, min(1.0, best_ratio))
+
+    @classmethod
+    def _point_from_ratio_on_polyline(cls, coords: list[float], ratio: float) -> tuple[float, float]:
+        """Compute the point at given ratio [0..1] along the polyline."""
+        import math
+        total_len = 0.0
+        seg_lengths = []
+        for i in range(0, len(coords) - 2, 2):
+            x1, y1 = coords[i], coords[i + 1]
+            x2, y2 = coords[i + 2], coords[i + 3]
+            seg_lengths.append(math.hypot(x2 - x1, y2 - y1))
+            total_len += seg_lengths[-1]
+        if total_len == 0:
+            return coords[0], coords[1]
+        target = ratio * total_len
+        cum = 0.0
+        for i, seg_len in enumerate(seg_lengths):
+            if cum + seg_len >= target or i == len(seg_lengths) - 1:
+                x1, y1 = coords[i * 2], coords[i * 2 + 1]
+                x2, y2 = coords[i * 2 + 2], coords[i * 2 + 3]
+                t = (target - cum) / seg_len if seg_len > 0 else 0
+                return x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+            cum += seg_len
+        return coords[-2], coords[-1]
 
     @staticmethod
     def _orthogonal_segments(
@@ -3455,6 +3593,22 @@ class DiagramApp:
             self._record_history()
             self._update_status_bar()
             return
+        # Single selected node delete
+        if self._active_node_name and self._mode == "normal" and not self._delete_mode:
+            node = self.nodes.get(self._active_node_name)
+            if node:
+                self._unhighlight_node()
+                self._remove_node(node)
+                self._active_node_name = None
+                self._update_status_bar()
+                return
+        # Single selected wire delete
+        if self._selected_wire and self._mode == "normal" and not self._delete_mode:
+            conn = self._selected_wire
+            self._deselect_wire()
+            self._remove_connection(conn)
+            self._update_status_bar()
+            return
         if self._delete_mode:
             self._stop_delete_blink()
             self._delete_mode = False
@@ -3598,6 +3752,9 @@ class DiagramApp:
         self._node_color_backup.pop(node.name, None)
         self._port_items = {key: value for key, value in self._port_items.items() if value[0] != node.name}
         self._outline_backup.pop(node.name, None)
+        # Remove from junction_ports of any parent wire
+        for conn in self.connections:
+            conn.junction_ports = [jp for jp in conn.junction_ports if jp.get("node") != node.name]
         self.nodes.pop(node.name, None)
         if self._active_node_name == node.name:
             self._active_node_name = None
@@ -3932,7 +4089,11 @@ class DiagramApp:
             port_side = "top"
         else:
             port_side = "left"
-        self._create_junction_at(px, py, port_side=port_side)
+        jname = self._create_junction_at(px, py, port_side=port_side)
+        # Register junction in parent wire's junction_ports
+        if jname:
+            ratio = self._point_ratio_on_polyline(coords, px, py)
+            connection.junction_ports.append({"node": jname, "ratio": ratio})
         self._exit_wire_port_mode()
 
     def _junction_port_xy(self, node: Node) -> tuple[float, float]:
@@ -3946,6 +4107,12 @@ class DiagramApp:
         """Find the wire (free-point or connected) that a PORT node sits on."""
         if node.kind != "PORT":
             return None
+        # First check junction_ports for definitive match
+        for conn in self.connections:
+            for jp in conn.junction_ports:
+                if jp.get("node") == node.name:
+                    return conn
+        # Fallback to proximity search
         ref_x, ref_y = self._junction_port_xy(node)
         best_conn = None
         best_dist = float("inf")
@@ -3996,7 +4163,7 @@ class DiagramApp:
         else:  # right
             return int(px - size), int(py - half)
 
-    def _create_junction_at(self, x: float, y: float, port_side: str = "left"):
+    def _create_junction_at(self, x: float, y: float, port_side: str = "left") -> str:
         name = self._unique_node_name("Junction")
         size = 12
         nx, ny = self._junction_node_pos(x, y, port_side, size)
@@ -4028,6 +4195,7 @@ class DiagramApp:
         self._draw_node(node)
         self._apply_z_order(active_node_name=node.name)
         self._record_history()
+        return name
 
     def _enter_wire_port_mode(self):
         connection = self._selected_wire
@@ -4283,6 +4451,19 @@ class DiagramApp:
                     conn_entry["line_thickness"] = connection.line_thickness
                 if not connection.show_arrow:
                     conn_entry["show_arrow"] = False
+                # Save junction port ratios
+                if connection.junction_ports:
+                    # Recompute ratios from current positions
+                    jp_list = []
+                    coords = self._connection_line_coords(connection)
+                    for jp in connection.junction_ports:
+                        jnode = self.nodes.get(jp.get("node"))
+                        if jnode and coords and len(coords) >= 4:
+                            jx, jy = self._junction_port_xy(jnode)
+                            ratio = self._point_ratio_on_polyline(coords, jx, jy)
+                            jp_list.append({"node": jp["node"], "ratio": round(ratio, 6)})
+                    if jp_list:
+                        conn_entry["junction_ports"] = jp_list
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -4312,6 +4493,18 @@ class DiagramApp:
                 wire_data["label_y"] = _unscale(connection.label_y)
             if not connection.show_arrow:
                 wire_data["show_arrow"] = False
+            # Save junction port ratios for wires with endpoints
+            if connection.junction_ports:
+                coords = self._connection_line_coords(connection)
+                jp_list = []
+                for jp in connection.junction_ports:
+                    jnode = self.nodes.get(jp.get("node"))
+                    if jnode and coords and len(coords) >= 4:
+                        jx, jy = self._junction_port_xy(jnode)
+                        ratio = self._point_ratio_on_polyline(coords, jx, jy)
+                        jp_list.append({"node": jp["node"], "ratio": round(ratio, 6)})
+                if jp_list:
+                    wire_data["junction_ports"] = jp_list
             wires.append(wire_data)
         return {"blocks": blocks, "connections": connections, "wires": wires}
 
@@ -4855,6 +5048,11 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                 connection.label_font_weight = str(entry["label_font_weight"])
             if "label_angle" in entry and entry["label_angle"] is not None:
                 connection.label_angle = int(entry["label_angle"])
+            if "junction_ports" in entry:
+                connection.junction_ports = [
+                    {"node": str(jp["node"]), "ratio": float(jp["ratio"])}
+                    for jp in entry["junction_ports"]
+                ]
         connections.append(connection)
 
     if wires_data:
@@ -4890,6 +5088,11 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.label_y = float(wire["label_y"])
                     if "show_arrow" in wire:
                         connection.show_arrow = bool(wire["show_arrow"])
+                    if "junction_ports" in wire:
+                        connection.junction_ports = [
+                            {"node": str(jp["node"]), "ratio": float(jp["ratio"])}
+                            for jp in wire["junction_ports"]
+                        ]
                     break
 
     return nodes, connections
