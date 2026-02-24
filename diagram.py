@@ -250,6 +250,15 @@ class DiagramApp:
         self._align_guides: list[int] = []
         self._align_threshold = 8
         self._grid_items: list[int] = []
+        self._node_highlight_id: int | None = None
+        # Multi-select state
+        self._multi_select: dict = {
+            "active": False, "rect_id": None,
+            "start_x": 0, "start_y": 0,
+            "nodes": [], "wires": [], "labels": [],
+            "dragging": False, "drag_x": 0, "drag_y": 0,
+            "highlights": [],
+        }
         self._build_ui()
 
     def _cx(self, event):
@@ -277,6 +286,8 @@ class DiagramApp:
         self.canvas.tag_bind("label", "<B1-Motion>", self._on_label_motion)
         self.canvas.tag_bind("label", "<ButtonRelease-1>", self._on_label_release)
         self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Control-MouseWheel>", self._on_zoom_wheel)
         self.canvas.bind("<Control-Button-4>", self._on_zoom_wheel)
@@ -716,9 +727,45 @@ class DiagramApp:
         x1, y1, x2, y2 = self.canvas.coords(canvas_id)
         return ((x1 + x2) / 2, (y1 + y2) / 2)
 
+    def _highlight_node(self, node: Node):
+        self._unhighlight_node()
+        x1, y1 = node.x, node.y
+        x2, y2 = node.x + node.width, node.y + node.height
+        self._node_highlight_id = self.canvas.create_rectangle(
+            x1 - 2, y1 - 2, x2 + 2, y2 + 2,
+            outline="#4A90D9", width=2, dash=(4, 2),
+        )
+        self.canvas.addtag_withtag(f"node:{node.name}", self._node_highlight_id)
+        node.items.append(self._node_highlight_id)
+
+    def _unhighlight_node(self):
+        if self._node_highlight_id:
+            self.canvas.delete(self._node_highlight_id)
+            # Remove from node items list
+            for node in self.nodes.values():
+                if self._node_highlight_id in node.items:
+                    node.items.remove(self._node_highlight_id)
+                    break
+            self._node_highlight_id = None
+
     def _on_press(self, event):
         self._deselect_wire()
         self._deselect_label()
+        # Check if clicking on a multi-selected node → start multi-drag
+        if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
+            item = self.canvas.find_withtag("current")
+            if item:
+                tags = self.canvas.gettags(item[0])
+                node_tag = next((t for t in tags if t.startswith("node:")), None)
+                if node_tag:
+                    clicked_name = node_tag.split(":", 1)[1]
+                    if clicked_name in self._multi_select["nodes"]:
+                        cx, cy = self._cx(event), self._cy(event)
+                        self._multi_select["dragging"] = True
+                        self._multi_select["drag_x"] = cx
+                        self._multi_select["drag_y"] = cy
+                        return
+            self._clear_multi_select()
         if self._delete_mode:
             item = self.canvas.find_withtag("current")
             if not item:
@@ -747,7 +794,9 @@ class DiagramApp:
             return
         node_name = node_tag.split(":", 1)[1]
         node = self.nodes[node_name]
+        self._unhighlight_node()
         self._active_node_name = node.name
+        self._highlight_node(node)
         self._apply_z_order(active_node_name=node.name)
         cx, cy = self._cx(event), self._cy(event)
         if node.resize_enabled:
@@ -793,10 +842,19 @@ class DiagramApp:
             item = self.canvas.find_withtag("current")
             if item:
                 tags = self.canvas.gettags(item[0])
-                if "label" in tags or "wire" in tags:
+                if "label" in tags or "wire" in tags or "node" in tags or "port" in tags:
                     return
+            # Background click: unhighlight, deselect, start multi-select
+            self._unhighlight_node()
+            self._active_node_name = None
             self._deselect_wire()
             self._deselect_label()
+            self._clear_multi_select()
+            if self._mode == "normal" and not self._delete_mode:
+                cx, cy = self._cx(event), self._cy(event)
+                self._multi_select["start_x"] = cx
+                self._multi_select["start_y"] = cy
+                self._multi_select["active"] = True
             return
         if len(self._selected_ports) != 1:
             return
@@ -834,6 +892,160 @@ class DiagramApp:
         if self._mode == "connect" and len(self._selected_ports) == 1:
             self._update_wire_preview(cx, cy)
 
+    def _clear_multi_select(self):
+        for hid in self._multi_select["highlights"]:
+            self.canvas.delete(hid)
+        if self._multi_select["rect_id"]:
+            self.canvas.delete(self._multi_select["rect_id"])
+        # Restore wire widths for selected wires
+        for conn in self._multi_select["wires"]:
+            if conn.line_id:
+                self.canvas.itemconfigure(conn.line_id, width=self._wire_width(conn))
+        self._multi_select = {
+            "active": False, "rect_id": None,
+            "start_x": 0, "start_y": 0,
+            "nodes": [], "wires": [], "labels": [],
+            "dragging": False, "drag_x": 0, "drag_y": 0,
+            "highlights": [],
+        }
+        self._update_status_bar()
+
+    def _on_canvas_drag(self, event):
+        if not self._multi_select["active"]:
+            return
+        # If multi-select dragging mode (moving selected items)
+        if self._multi_select["dragging"]:
+            self._on_multi_drag(event)
+            return
+        cx, cy = self._cx(event), self._cy(event)
+        sx, sy = self._multi_select["start_x"], self._multi_select["start_y"]
+        if self._multi_select["rect_id"]:
+            self.canvas.coords(self._multi_select["rect_id"], sx, sy, cx, cy)
+        else:
+            self._multi_select["rect_id"] = self.canvas.create_rectangle(
+                sx, sy, cx, cy,
+                outline="#4A90D9", width=1, dash=(4, 2),
+            )
+
+    def _on_canvas_release(self, event):
+        if not self._multi_select["active"]:
+            return
+        if self._multi_select["dragging"]:
+            self._multi_select["dragging"] = False
+            self._record_history()
+            return
+        cx, cy = self._cx(event), self._cy(event)
+        sx, sy = self._multi_select["start_x"], self._multi_select["start_y"]
+        # Remove selection rectangle
+        if self._multi_select["rect_id"]:
+            self.canvas.delete(self._multi_select["rect_id"])
+            self._multi_select["rect_id"] = None
+        x1, y1 = min(sx, cx), min(sy, cy)
+        x2, y2 = max(sx, cx), max(sy, cy)
+        # If rectangle is too small, treat as a click (clear)
+        if abs(x2 - x1) < 5 and abs(y2 - y1) < 5:
+            self._multi_select["active"] = False
+            return
+        # Find nodes in rectangle
+        selected_nodes = []
+        for node in self.nodes.values():
+            nx1, ny1 = node.x, node.y
+            nx2, ny2 = node.x + node.width, node.y + node.height
+            if nx1 >= x1 and ny1 >= y1 and nx2 <= x2 and ny2 <= y2:
+                selected_nodes.append(node.name)
+        # Find wires in rectangle
+        selected_wires = []
+        for conn in self.connections:
+            coords = self._connection_line_coords(conn)
+            if not coords or len(coords) < 4:
+                continue
+            all_inside = True
+            for i in range(0, len(coords), 2):
+                px, py = coords[i], coords[i + 1]
+                if px < x1 or px > x2 or py < y1 or py > y2:
+                    all_inside = False
+                    break
+            if all_inside:
+                selected_wires.append(conn)
+        # Find labels in rectangle
+        selected_labels = []
+        for conn in self.connections:
+            if conn.label_id:
+                bbox = self.canvas.bbox(conn.label_id)
+                if bbox:
+                    lx1, ly1, lx2, ly2 = bbox
+                    if lx1 >= x1 and ly1 >= y1 and lx2 <= x2 and ly2 <= y2:
+                        if conn not in selected_wires:
+                            selected_labels.append(conn)
+        if not selected_nodes and not selected_wires and not selected_labels:
+            self._multi_select["active"] = False
+            return
+        self._multi_select["nodes"] = selected_nodes
+        self._multi_select["wires"] = selected_wires
+        self._multi_select["labels"] = selected_labels
+        # Draw highlights
+        highlights = []
+        for name in selected_nodes:
+            node = self.nodes[name]
+            hid = self.canvas.create_rectangle(
+                node.x - 2, node.y - 2,
+                node.x + node.width + 2, node.y + node.height + 2,
+                outline="#4A90D9", width=2, dash=(4, 2),
+            )
+            highlights.append(hid)
+        for conn in selected_wires:
+            if conn.line_id:
+                self.canvas.itemconfigure(conn.line_id, width=self._wire_selected_width(conn))
+        self._multi_select["highlights"] = highlights
+        self._multi_select["active"] = True
+        self._update_status_bar()
+
+    def _on_multi_drag(self, event):
+        cx, cy = self._cx(event), self._cy(event)
+        dx = cx - self._multi_select["drag_x"]
+        dy = cy - self._multi_select["drag_y"]
+        sdx = self._snap_value(dx) if abs(dx) >= self.GRID_STEP / 2 else 0
+        sdy = self._snap_value(dy) if abs(dy) >= self.GRID_STEP / 2 else 0
+        if sdx == 0 and sdy == 0:
+            return
+        self._multi_select["drag_x"] = cx
+        self._multi_select["drag_y"] = cy
+        # Move nodes
+        for name in self._multi_select["nodes"]:
+            node = self.nodes.get(name)
+            if not node:
+                continue
+            self.canvas.move(f"node:{name}", sdx, sdy)
+            node.x += sdx
+            node.y += sdy
+            for port in node.inputs + node.outputs:
+                if port.manual_y is not None:
+                    port.manual_y += sdy
+        # Move free wires
+        for conn in self._multi_select["wires"]:
+            if conn.free_points:
+                conn.free_points = [(px + sdx, py + sdy) for px, py in conn.free_points]
+            if conn.waypoints:
+                conn.waypoints = [(wx + sdx, wy + sdy) for wx, wy in conn.waypoints]
+            if conn.manual_mid_x is not None:
+                conn.manual_mid_x += sdx
+            if conn.manual_mid_y is not None:
+                conn.manual_mid_y += sdy
+            if conn.label_x is not None:
+                conn.label_x += sdx
+            if conn.label_y is not None:
+                conn.label_y += sdy
+        # Move label positions for selected labels
+        for conn in self._multi_select["labels"]:
+            if conn.label_x is not None:
+                conn.label_x += sdx
+            if conn.label_y is not None:
+                conn.label_y += sdy
+        # Move highlight rectangles
+        for hid in self._multi_select["highlights"]:
+            self.canvas.move(hid, sdx, sdy)
+        self._update_connections()
+
     def _snap_junctions_to_wires(self):
         """Snap all PORT (junction) nodes so their port circle sits on the parent wire."""
         for node in list(self.nodes.values()):
@@ -864,6 +1076,9 @@ class DiagramApp:
                     port.manual_y += ddy
 
     def _on_release(self, _event):
+        # Multi-select drag release is handled by _on_canvas_release
+        if self._multi_select["dragging"]:
+            return
         if self._drag_data["node"] and not self._resize_data["node"]:
             node = self._drag_data["node"]
             for connection in self.connections:
@@ -884,6 +1099,9 @@ class DiagramApp:
 
     def _on_motion(self, event):
         if self._mode != "normal":
+            return
+        # Multi-select drag is handled by _on_canvas_drag
+        if self._multi_select["dragging"]:
             return
         if self._resize_data["node"] is not None:
             self._on_resize_motion(event)
@@ -1569,6 +1787,19 @@ class DiagramApp:
             return
         if self._mode != "normal":
             return
+        # Check if clicking on a multi-selected wire → start multi-drag
+        if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
+            item = self.canvas.find_withtag("current")
+            if item:
+                line_id = item[0]
+                clicked_conn = next((c for c in self.connections if c.line_id == line_id), None)
+                if clicked_conn and clicked_conn in self._multi_select["wires"]:
+                    self._multi_select["dragging"] = True
+                    self._multi_select["active"] = True
+                    self._multi_select["drag_x"] = event.x
+                    self._multi_select["drag_y"] = event.y
+                    return
+            self._clear_multi_select()
         self._deselect_label()
         item = self.canvas.find_withtag("current")
         if not item:
@@ -1803,6 +2034,9 @@ class DiagramApp:
 
     def _on_wire_motion(self, event):
         event.x, event.y = self._cx(event), self._cy(event)
+        # Multi-select drag is handled by _on_canvas_drag
+        if self._multi_select["dragging"]:
+            return
         connection: Connection | None = self._drag_wire["connection"]
         if not connection:
             return
@@ -1928,9 +2162,32 @@ class DiagramApp:
             self.canvas.coords(connection.line_id, *coords)
             if connection.label_id:
                 self._update_label(connection, coords)
+            # Snap PORT junctions on this wire to new positions
+            for jnode in list(self.nodes.values()):
+                if jnode.kind != "PORT":
+                    continue
+                if self._find_parent_wire(jnode) is not connection:
+                    continue
+                ref_x, ref_y = self._junction_port_xy(jnode)
+                npx, npy = self._nearest_point_on_polyline(coords, ref_x, ref_y)
+                jports = jnode.inputs + jnode.outputs
+                jside = jports[0].side if jports else "left"
+                jnx, jny = self._junction_node_pos(npx, npy, jside, jnode.width)
+                jdx, jdy = jnx - jnode.x, jny - jnode.y
+                if jdx != 0 or jdy != 0:
+                    self.canvas.move(f"node:{jnode.name}", jdx, jdy)
+                    jnode.x += jdx
+                    jnode.y += jdy
+                    for jp in jnode.inputs + jnode.outputs:
+                        if jp.manual_y is not None:
+                            jp.manual_y += jdy
+            self._update_connections()
             return
 
     def _on_wire_release(self, _event):
+        # Multi-select drag release is handled by _on_canvas_release
+        if self._multi_select["dragging"]:
+            return
         if self._drag_wire["connection"]:
             self._simplify_waypoints(self._drag_wire["connection"])
             self._update_connections()
@@ -2001,7 +2258,19 @@ class DiagramApp:
             mode_text = "save"
         self._status_mode_label.config(text=f"Mode: {mode_text}")
         sel_text = ""
-        if self._selected_wire:
+        ms = self._multi_select
+        if ms["nodes"] or ms["wires"] or ms["labels"]:
+            items = []
+            for name in ms["nodes"]:
+                node = self.nodes.get(name)
+                if node:
+                    items.append(node.name if node.kind == "BLOCK" else node.kind)
+            for _conn in ms["wires"]:
+                items.append("wire")
+            for conn in ms["labels"]:
+                items.append(f"label({conn.label})" if conn.label else "label")
+            sel_text = "| Selected: " + ", ".join(items)
+        elif self._selected_wire:
             sel_text = "| Selected: wire"
         elif self._active_node_name:
             node = self.nodes.get(self._active_node_name)
@@ -2026,6 +2295,19 @@ class DiagramApp:
             return
         if self._mode != "normal":
             return
+        # Check if clicking on a multi-selected label → start multi-drag
+        if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
+            item = self.canvas.find_withtag("current")
+            if item:
+                label_id = item[0]
+                clicked_conn = next((c for c in self.connections if c.label_id == label_id), None)
+                if clicked_conn and (clicked_conn in self._multi_select["labels"] or clicked_conn in self._multi_select["wires"]):
+                    self._multi_select["dragging"] = True
+                    self._multi_select["active"] = True
+                    self._multi_select["drag_x"] = event.x
+                    self._multi_select["drag_y"] = event.y
+                    return
+            self._clear_multi_select()
         item = self.canvas.find_withtag("current")
         if not item:
             return
@@ -2049,6 +2331,9 @@ class DiagramApp:
 
     def _on_label_motion(self, event):
         event.x, event.y = self._cx(event), self._cy(event)
+        # Multi-select drag is handled by _on_canvas_drag
+        if self._multi_select["dragging"]:
+            return
         connection = self._label_drag_data.get("connection")
         if not connection or not connection.label_id:
             return
@@ -2065,6 +2350,9 @@ class DiagramApp:
         self._draw_point_alignment_guides(lx, ly)
 
     def _on_label_release(self, _event):
+        # Multi-select drag release is handled by _on_canvas_release
+        if self._multi_select["dragging"]:
+            return
         if self._label_drag_data.get("connection"):
             self._record_history()
         self._label_drag_data["connection"] = None
@@ -2104,67 +2392,59 @@ class DiagramApp:
                         best_y = sy + int(ry - my)
         return best_x, best_y
 
+    def _collect_guide_refs(self, exclude_node: str | None = None) -> tuple[list[float], list[float]]:
+        """Collect all reference X and Y positions for alignment guides."""
+        ref_xs: list[float] = []
+        ref_ys: list[float] = []
+        for node in self.nodes.values():
+            if node.name == exclude_node:
+                continue
+            if node.kind == "PORT":
+                cx, cy = self._junction_port_xy(node)
+                ref_xs.append(cx)
+                ref_ys.append(cy)
+            else:
+                ref_xs.extend([node.x, node.x + node.width / 2, node.x + node.width])
+                ref_ys.extend([node.y, node.y + node.height / 2, node.y + node.height])
+                for port in node.inputs + node.outputs:
+                    ppx, ppy = self._port_position(node, port)
+                    ref_xs.append(ppx)
+                    ref_ys.append(ppy)
+        for conn in self.connections:
+            coords = self._connection_line_coords(conn)
+            if coords:
+                for i in range(0, len(coords), 2):
+                    ref_xs.append(coords[i])
+                    ref_ys.append(coords[i + 1])
+        return ref_xs, ref_ys
+
     def _draw_alignment_guides(self, moving_node: Node):
         self._clear_alignment_guides()
-        threshold = self._align_threshold
-        mx_left = moving_node.x
-        mx_cx = moving_node.x + moving_node.width / 2
-        mx_right = moving_node.x + moving_node.width
-        my_top = moving_node.y
-        my_cy = moving_node.y + moving_node.height / 2
-        my_bottom = moving_node.y + moving_node.height
+        if moving_node.kind == "PORT":
+            cx, cy = self._junction_port_xy(moving_node)
+            moving_xs = [cx]
+            moving_ys = [cy]
+        else:
+            moving_xs = [moving_node.x, moving_node.x + moving_node.width / 2, moving_node.x + moving_node.width]
+            moving_ys = [moving_node.y, moving_node.y + moving_node.height / 2, moving_node.y + moving_node.height]
         guide_color = "#4A90D9"
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
-        drawn_x = set()
-        drawn_y = set()
-        for other in self.nodes.values():
-            if other.name == moving_node.name:
-                continue
-            if other.kind == "PORT":
-                cx, cy = self._junction_port_xy(other)
-                ref_xs = [cx]
-                ref_ys = [cy]
-            else:
-                ref_xs = [other.x, other.x + other.width / 2, other.x + other.width]
-                ref_ys = [other.y, other.y + other.height / 2, other.y + other.height]
-            for rx in ref_xs:
-                for mx in [mx_left, mx_cx, mx_right]:
-                    if abs(mx - rx) < 1 and rx not in drawn_x:
-                        drawn_x.add(rx)
-                        gid = self.canvas.create_line(
-                            rx, 0, rx, canvas_h,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                        self._align_guides.append(gid)
-            for ry in ref_ys:
-                for my in [my_top, my_cy, my_bottom]:
-                    if abs(my - ry) < 1 and ry not in drawn_y:
-                        drawn_y.add(ry)
-                        gid = self.canvas.create_line(
-                            0, ry, canvas_w, ry,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                        self._align_guides.append(gid)
-        # Wire free_points as references for wire-to-wire guides
-        for conn in self.connections:
-            for fp_x, fp_y in conn.free_points:
-                for mx in [mx_left, mx_cx, mx_right]:
-                    if abs(mx - fp_x) < 1 and fp_x not in drawn_x:
-                        drawn_x.add(fp_x)
-                        gid = self.canvas.create_line(
-                            fp_x, 0, fp_x, canvas_h,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                        self._align_guides.append(gid)
-                for my in [my_top, my_cy, my_bottom]:
-                    if abs(my - fp_y) < 1 and fp_y not in drawn_y:
-                        drawn_y.add(fp_y)
-                        gid = self.canvas.create_line(
-                            0, fp_y, canvas_w, fp_y,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                        self._align_guides.append(gid)
+        drawn_x: set[float] = set()
+        drawn_y: set[float] = set()
+        all_rx, all_ry = self._collect_guide_refs(exclude_node=moving_node.name)
+        for rx in all_rx:
+            for mx in moving_xs:
+                if abs(mx - rx) < 1 and rx not in drawn_x:
+                    drawn_x.add(rx)
+                    gid = self.canvas.create_line(rx, 0, rx, canvas_h, fill=guide_color, dash=(4, 4), width=1)
+                    self._align_guides.append(gid)
+        for ry in all_ry:
+            for my in moving_ys:
+                if abs(my - ry) < 1 and ry not in drawn_y:
+                    drawn_y.add(ry)
+                    gid = self.canvas.create_line(0, ry, canvas_w, ry, fill=guide_color, dash=(4, 4), width=1)
+                    self._align_guides.append(gid)
 
     def _draw_point_alignment_guides(self, px: float, py: float):
         self._clear_alignment_guides()
@@ -2172,49 +2452,19 @@ class DiagramApp:
         guide_color = "#4A90D9"
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
-        drawn_x = set()
-        drawn_y = set()
-        for node in self.nodes.values():
-            if node.kind == "PORT":
-                cx, cy = self._junction_port_xy(node)
-                ref_xs = [cx]
-                ref_ys = [cy]
-            else:
-                ref_xs = [node.x, node.x + node.width / 2, node.x + node.width]
-                ref_ys = [node.y, node.y + node.height / 2, node.y + node.height]
-            for rx in ref_xs:
-                if abs(px - rx) < threshold and rx not in drawn_x:
-                    drawn_x.add(rx)
-                    gid = self.canvas.create_line(
-                        rx, 0, rx, canvas_h,
-                        fill=guide_color, dash=(4, 4), width=1,
-                    )
-                    self._align_guides.append(gid)
-            for ry in ref_ys:
-                if abs(py - ry) < threshold and ry not in drawn_y:
-                    drawn_y.add(ry)
-                    gid = self.canvas.create_line(
-                        0, ry, canvas_w, ry,
-                        fill=guide_color, dash=(4, 4), width=1,
-                    )
-                    self._align_guides.append(gid)
-        # Wire free_points as references for wire-to-wire guides
-        for conn in self.connections:
-            for fp_x, fp_y in conn.free_points:
-                if abs(px - fp_x) < threshold and fp_x not in drawn_x:
-                    drawn_x.add(fp_x)
-                    gid = self.canvas.create_line(
-                        fp_x, 0, fp_x, canvas_h,
-                        fill=guide_color, dash=(4, 4), width=1,
-                    )
-                    self._align_guides.append(gid)
-                if abs(py - fp_y) < threshold and fp_y not in drawn_y:
-                    drawn_y.add(fp_y)
-                    gid = self.canvas.create_line(
-                        0, fp_y, canvas_w, fp_y,
-                        fill=guide_color, dash=(4, 4), width=1,
-                    )
-                    self._align_guides.append(gid)
+        drawn_x: set[float] = set()
+        drawn_y: set[float] = set()
+        all_rx, all_ry = self._collect_guide_refs()
+        for rx in all_rx:
+            if abs(px - rx) < threshold and rx not in drawn_x:
+                drawn_x.add(rx)
+                gid = self.canvas.create_line(rx, 0, rx, canvas_h, fill=guide_color, dash=(4, 4), width=1)
+                self._align_guides.append(gid)
+        for ry in all_ry:
+            if abs(py - ry) < threshold and ry not in drawn_y:
+                drawn_y.add(ry)
+                gid = self.canvas.create_line(0, ry, canvas_w, ry, fill=guide_color, dash=(4, 4), width=1)
+                self._align_guides.append(gid)
 
     def _draw_single_axis_guide(self, value: float, axis: str):
         """Draw alignment guide for a single axis: 'x' for vertical line, 'y' for horizontal line."""
@@ -2223,48 +2473,22 @@ class DiagramApp:
         guide_color = "#4A90D9"
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
-        drawn = set()
-        for node in self.nodes.values():
-            if node.kind == "PORT":
-                cx, cy = self._junction_port_xy(node)
-                refs = [cy] if axis == "y" else [cx]
-            elif axis == "y":
-                refs = [node.y, node.y + node.height / 2, node.y + node.height]
-            else:
-                refs = [node.x, node.x + node.width / 2, node.x + node.width]
-            for r in refs:
-                if abs(value - r) < threshold and r not in drawn:
-                    drawn.add(r)
-                    if axis == "y":
-                        gid = self.canvas.create_line(
-                            0, r, canvas_w, r,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                    else:
-                        gid = self.canvas.create_line(
-                            r, 0, r, canvas_h,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                    self._align_guides.append(gid)
-        # Wire free_points as references for wire-to-wire guides
-        for conn in self.connections:
-            for fp_x, fp_y in conn.free_points:
-                r = fp_y if axis == "y" else fp_x
-                if abs(value - r) < threshold and r not in drawn:
-                    drawn.add(r)
-                    if axis == "y":
-                        gid = self.canvas.create_line(
-                            0, r, canvas_w, r,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                    else:
-                        gid = self.canvas.create_line(
-                            r, 0, r, canvas_h,
-                            fill=guide_color, dash=(4, 4), width=1,
-                        )
-                    self._align_guides.append(gid)
+        drawn: set[float] = set()
+        all_rx, all_ry = self._collect_guide_refs()
+        refs = all_ry if axis == "y" else all_rx
+        for r in refs:
+            if abs(value - r) < threshold and r not in drawn:
+                drawn.add(r)
+                if axis == "y":
+                    gid = self.canvas.create_line(0, r, canvas_w, r, fill=guide_color, dash=(4, 4), width=1)
+                else:
+                    gid = self.canvas.create_line(r, 0, r, canvas_h, fill=guide_color, dash=(4, 4), width=1)
+                self._align_guides.append(gid)
 
     def _handle_escape(self):
+        if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
+            self._clear_multi_select()
+            return
         if self._delete_mode:
             self._toggle_delete_mode()
             return
@@ -3205,6 +3429,32 @@ class DiagramApp:
         self._wire_preview_id = None
 
     def _toggle_delete_mode(self):
+        # Multi-select delete: delete all selected items immediately
+        if self._multi_select["nodes"] or self._multi_select["wires"] or self._multi_select["labels"]:
+            # Remove highlights first
+            for hid in self._multi_select["highlights"]:
+                self.canvas.delete(hid)
+            self._multi_select["highlights"] = []
+            # Delete selected wires/labels
+            for conn in list(self._multi_select["wires"]):
+                self._remove_connection(conn, record=False)
+            for conn in list(self._multi_select["labels"]):
+                self._remove_connection(conn, record=False)
+            # Delete selected nodes
+            for name in list(self._multi_select["nodes"]):
+                node = self.nodes.get(name)
+                if node:
+                    self._remove_node(node)
+            self._multi_select = {
+                "active": False, "rect_id": None,
+                "start_x": 0, "start_y": 0,
+                "nodes": [], "wires": [], "labels": [],
+                "dragging": False, "drag_x": 0, "drag_y": 0,
+                "highlights": [],
+            }
+            self._record_history()
+            self._update_status_bar()
+            return
         if self._delete_mode:
             self._stop_delete_blink()
             self._delete_mode = False
@@ -3700,6 +3950,11 @@ class DiagramApp:
         best_conn = None
         best_dist = float("inf")
         for conn in self.connections:
+            # Skip connections FROM or TO this junction node
+            if conn.src and conn.src[0] == node.name:
+                continue
+            if conn.dst and conn.dst[0] == node.name:
+                continue
             coords = self._connection_line_coords(conn)
             if not coords or len(coords) < 4:
                 continue
