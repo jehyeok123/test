@@ -69,6 +69,7 @@ class Connection:
     free_points: list[tuple[float, float]] = field(default_factory=list)
     show_arrow: bool = True
     junction_ports: list[dict] = field(default_factory=list)
+    pending_wire_ports: list[dict] = field(default_factory=list)
 
 
 class DiagramApp:
@@ -268,12 +269,34 @@ class DiagramApp:
     def _cy(self, event):
         return int(self.canvas.canvasy(event.y))
 
+    def _materialize_pending_ports(self):
+        """Create PORT nodes for connections with pending_wire_ports (w-wires loaded from JSON)."""
+        old_suspend = self._suspend_history
+        self._suspend_history = True
+        for connection in self.connections:
+            if not connection.pending_wire_ports:
+                continue
+            coords = self._connection_line_coords(connection)
+            if not coords or len(coords) < 4:
+                continue
+            for pr in connection.pending_wire_ports:
+                ratio = pr["ratio"]
+                pname = pr.get("name")
+                px, py = self._point_from_ratio_on_polyline(coords, ratio)
+                seg_dir = self._segment_direction_at(coords, px, py)
+                port_side = "top" if seg_dir == "horizontal" else "left"
+                jname = self._create_junction_at(px, py, port_side=port_side, name=pname)
+                connection.junction_ports.append({"node": jname, "ratio": ratio})
+            connection.pending_wire_ports.clear()
+        self._suspend_history = old_suspend
+
     def _build_ui(self):
         self._draw_grid()
         for node in self.nodes.values():
             self._draw_node(node)
         for connection in self.connections:
             self._draw_connection(connection)
+        self._materialize_pending_ports()
         self.canvas.tag_bind("node", "<ButtonPress-1>", self._on_press)
         self.canvas.tag_bind("node", "<ButtonRelease-1>", self._on_release)
         self.canvas.tag_bind("node", "<B1-Motion>", self._on_motion)
@@ -1032,6 +1055,7 @@ class DiagramApp:
                 if port.manual_y is not None:
                     port.manual_y += sdy
         # Move free wires
+        moved_junctions: set[str] = set()
         for conn in self._multi_select["wires"]:
             if conn.free_points:
                 conn.free_points = [(px + sdx, py + sdy) for px, py in conn.free_points]
@@ -1045,6 +1069,19 @@ class DiagramApp:
                 conn.label_x += sdx
             if conn.label_y is not None:
                 conn.label_y += sdy
+            # Move junction PORTs that aren't already in selected nodes
+            for jp in conn.junction_ports:
+                jname = jp.get("node")
+                if jname and jname not in self._multi_select["nodes"] and jname not in moved_junctions:
+                    jnode = self.nodes.get(jname)
+                    if jnode:
+                        self.canvas.move(f"node:{jname}", sdx, sdy)
+                        jnode.x += sdx
+                        jnode.y += sdy
+                        for port in jnode.inputs + jnode.outputs:
+                            if port.manual_y is not None:
+                                port.manual_y += sdy
+                        moved_junctions.add(jname)
         # Move label positions for selected labels
         for conn in self._multi_select["labels"]:
             if conn.label_x is not None:
@@ -1106,6 +1143,31 @@ class DiagramApp:
             node.x += ddx
             node.y += ddy
             for port in node.inputs + node.outputs:
+                if port.manual_y is not None:
+                    port.manual_y += ddy
+
+    def _reposition_junctions(self, connection: Connection):
+        """Reposition all junction PORTs on a connection to stay on the wire."""
+        coords = self._connection_line_coords(connection)
+        if not coords or len(coords) < 4:
+            return
+        for jp in connection.junction_ports:
+            jnode = self.nodes.get(jp.get("node"))
+            if not jnode:
+                continue
+            ref_x, ref_y = self._junction_port_xy(jnode)
+            px, py = self._nearest_point_on_polyline(coords, ref_x, ref_y)
+            ports = jnode.inputs + jnode.outputs
+            port_side = ports[0].side if ports else "left"
+            new_x, new_y = self._junction_node_pos(px, py, port_side, jnode.width)
+            ddx = new_x - jnode.x
+            ddy = new_y - jnode.y
+            if ddx == 0 and ddy == 0:
+                continue
+            self.canvas.move(f"node:{jnode.name}", ddx, ddy)
+            jnode.x += ddx
+            jnode.y += ddy
+            for port in jnode.inputs + jnode.outputs:
                 if port.manual_y is not None:
                     port.manual_y += ddy
 
@@ -2162,6 +2224,8 @@ class DiagramApp:
             x2, y2 = self._port_center(dst_id)
             coords = self._connection_coords_horizontal((x1, y1), (x2, y2), connection.manual_mid_x)
             self.canvas.coords(connection.line_id, *coords)
+            self._reposition_junctions(connection)
+            self._update_connections()
             return
         if mode == "mid_y":
             raw_mid = event.y - self._drag_wire["offset"]
@@ -2177,6 +2241,8 @@ class DiagramApp:
             x2, y2 = self._port_center(dst_id)
             coords = self._connection_coords_vertical((x1, y1), (x2, y2), connection.manual_mid_y)
             self.canvas.coords(connection.line_id, *coords)
+            self._reposition_junctions(connection)
+            self._update_connections()
             return
         if mode == "both_ports":
             if self._mode != "normal":
@@ -2195,6 +2261,8 @@ class DiagramApp:
                 if n and p and p.canvas_id:
                     cx, cy = self._port_center(p.canvas_id)
                     self._move_port(n, p, cx + sdx, cy + sdy)
+            self._update_connections()
+            self._reposition_junctions(connection)
             self._update_connections()
             return
         if mode in ("src_port", "dst_port"):
@@ -2218,6 +2286,8 @@ class DiagramApp:
                 else:
                     connection.waypoints[wp_idx] = (px, wy)
                 self._update_connections()
+            self._reposition_junctions(connection)
+            self._update_connections()
             return
         if mode in ("wp_h", "wp_v"):
             seg_idx = self._drag_wire.get("seg_index")
@@ -3809,6 +3879,29 @@ class DiagramApp:
             self._selected_wire = None
         if self._selected_label_conn is connection:
             self._deselect_label()
+        # Remove junction PORT nodes owned by this connection
+        for jp in connection.junction_ports:
+            jname = jp.get("node")
+            jnode = self.nodes.get(jname)
+            if jnode and jnode.kind == "PORT":
+                # Remove wires connected from/to this junction
+                child_conns = [
+                    c for c in self.connections
+                    if c is not connection and (
+                        (c.src and c.src[0] == jname) or (c.dst and c.dst[0] == jname)
+                    )
+                ]
+                for cc in child_conns:
+                    if cc.line_id:
+                        self.canvas.delete(cc.line_id)
+                        self._wire_color_backup.pop(cc.line_id, None)
+                    if cc.label_id:
+                        self.canvas.delete(cc.label_id)
+                self.connections = [c for c in self.connections if c not in child_conns]
+                for item in jnode.items:
+                    self.canvas.delete(item)
+                self._port_items = {k: v for k, v in self._port_items.items() if v[0] != jname}
+                self.nodes.pop(jname, None)
         if connection.line_id:
             self.canvas.delete(connection.line_id)
             self._wire_color_backup.pop(connection.line_id, None)
@@ -4207,8 +4300,10 @@ class DiagramApp:
         else:  # right
             return int(px - size), int(py - half)
 
-    def _create_junction_at(self, x: float, y: float, port_side: str = "left") -> str:
-        name = self._unique_node_name("Junction")
+    def _create_junction_at(self, x: float, y: float, port_side: str = "left",
+                            name: str | None = None) -> str:
+        if not name or name in self.nodes:
+            name = self._unique_node_name("Junction")
         size = 12
         nx, ny = self._junction_node_pos(x, y, port_side, size)
         node = Node(
@@ -4433,8 +4528,18 @@ class DiagramApp:
                 return value
             return round(value / self._zoom_scale, 2)
 
+        # Collect junction PORT node names to exclude from blocks
+        junction_node_names: set[str] = set()
+        for connection in self.connections:
+            for jp in connection.junction_ports:
+                node_name = jp.get("node")
+                if node_name:
+                    junction_node_names.add(node_name)
+
         blocks = []
         for node in self.nodes.values():
+            if node.name in junction_node_names:
+                continue
             ports = {}
             for port in node.inputs + node.outputs:
                 ports[port.name] = {
@@ -4495,9 +4600,9 @@ class DiagramApp:
                     conn_entry["line_thickness"] = connection.line_thickness
                 if not connection.show_arrow:
                     conn_entry["show_arrow"] = False
-                # Save junction port ratios
+                # Save junction ports inline as WIRE_BAR
                 if connection.junction_ports:
-                    # Recompute ratios from current positions
+                    conn_entry["kind"] = "WIRE_BAR"
                     jp_list = []
                     coords = self._connection_line_coords(connection)
                     for jp in connection.junction_ports:
@@ -4505,9 +4610,9 @@ class DiagramApp:
                         if jnode and coords and len(coords) >= 4:
                             jx, jy = self._junction_port_xy(jnode)
                             ratio = self._point_ratio_on_polyline(coords, jx, jy)
-                            jp_list.append({"node": jp["node"], "ratio": round(ratio, 6)})
+                            jp_list.append({"name": jp["node"], "ratio": round(ratio, 6)})
                     if jp_list:
-                        conn_entry["junction_ports"] = jp_list
+                        conn_entry["ports"] = jp_list
             connections.append(conn_entry)
             if not connection.src and not connection.dst:
                 continue
@@ -4537,18 +4642,18 @@ class DiagramApp:
                 wire_data["label_y"] = _unscale(connection.label_y)
             if not connection.show_arrow:
                 wire_data["show_arrow"] = False
-            # Save junction port ratios for wires with endpoints
+            # Save junction ports inline in wire data
             if connection.junction_ports:
-                coords = self._connection_line_coords(connection)
                 jp_list = []
+                coords = self._connection_line_coords(connection)
                 for jp in connection.junction_ports:
                     jnode = self.nodes.get(jp.get("node"))
                     if jnode and coords and len(coords) >= 4:
                         jx, jy = self._junction_port_xy(jnode)
                         ratio = self._point_ratio_on_polyline(coords, jx, jy)
-                        jp_list.append({"node": jp["node"], "ratio": round(ratio, 6)})
+                        jp_list.append({"name": jp["node"], "ratio": round(ratio, 6)})
                 if jp_list:
-                    wire_data["junction_ports"] = jp_list
+                    wire_data["ports"] = jp_list
             wires.append(wire_data)
         return {"blocks": blocks, "connections": connections, "wires": wires}
 
@@ -4603,6 +4708,7 @@ class DiagramApp:
             self._draw_node(node)
         for connection in self.connections:
             self._draw_connection(connection)
+        self._materialize_pending_ports()
         self._apply_z_order()
         self._update_connections()
         self._update_scroll_region()
@@ -4950,6 +5056,65 @@ def _parse_port_specs(
     return ports
 
 
+def _segment_direction_at_ratio(coords: list[float], ratio: float) -> str:
+    """Determine segment direction (horizontal/vertical) at a given ratio along a polyline."""
+    import math
+    total_len = 0.0
+    seg_lengths = []
+    for i in range(0, len(coords) - 2, 2):
+        x1, y1 = coords[i], coords[i + 1]
+        x2, y2 = coords[i + 2], coords[i + 3]
+        seg_lengths.append(math.hypot(x2 - x1, y2 - y1))
+        total_len += seg_lengths[-1]
+    if total_len == 0:
+        return "horizontal"
+    target = ratio * total_len
+    cum = 0.0
+    for i, seg_len in enumerate(seg_lengths):
+        if cum + seg_len >= target or i == len(seg_lengths) - 1:
+            x1, y1 = coords[i * 2], coords[i * 2 + 1]
+            x2, y2 = coords[i * 2 + 2], coords[i * 2 + 3]
+            if abs(y2 - y1) < abs(x2 - x1):
+                return "horizontal"
+            return "vertical"
+        cum += seg_len
+    return "horizontal"
+
+
+def _create_junction_node_data(nodes: dict, px: float, py: float, port_side: str,
+                               name: str | None = None) -> str:
+    """Create a PORT junction node in the nodes dict and return its name."""
+    if not name or name in nodes:
+        idx = 1
+        while f"Junction{idx}" in nodes:
+            idx += 1
+        name = f"Junction{idx}"
+    size = 12
+    half = size / 2
+    if port_side == "top":
+        nx, ny = int(px - half), int(py)
+    elif port_side == "bottom":
+        nx, ny = int(px - half), int(py - size)
+    elif port_side == "left":
+        nx, ny = int(px), int(py - half)
+    else:
+        nx, ny = int(px - size), int(py - half)
+    max_level = max((n.level for n in nodes.values()), default=-1) + 1
+    node = Node(
+        name=name, kind="PORT", inputs=[], outputs=[],
+        x=nx, y=ny, width=size, height=size, base_height=size,
+        level=max_level, fill_color="white", outline_color="black",
+        outline_enabled=True, outline_style="solid", outline_scale=1.0,
+        label_font_size=1, label_font_family="Arial", label_font_weight="normal",
+    )
+    port = Port(name="p1", kind="io", side=port_side, offset=0.5)
+    if port_side in ("left", "right"):
+        port.manual_y = py
+    node.inputs = [port]
+    nodes[name] = node
+    return name
+
+
 def _parse_endpoint(value: object | None) -> tuple[str, str] | None:
     if value is None:
         return None
@@ -5092,7 +5257,21 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                 connection.label_font_weight = str(entry["label_font_weight"])
             if "label_angle" in entry and entry["label_angle"] is not None:
                 connection.label_angle = int(entry["label_angle"])
-            if "junction_ports" in entry:
+            # New WIRE_BAR format: ports with ratio (and optional name)
+            if "ports" in entry and entry.get("kind") == "WIRE_BAR":
+                # Create PORT nodes from ratios using free_points
+                if connection.free_points:
+                    coords = [c for pt in connection.free_points for c in pt]
+                    for p in entry["ports"]:
+                        ratio = float(p["ratio"])
+                        pname = p.get("name")
+                        px, py = DiagramApp._point_from_ratio_on_polyline(coords, ratio)
+                        seg_dir = _segment_direction_at_ratio(coords, ratio)
+                        port_side = "top" if seg_dir == "horizontal" else "left"
+                        jname = _create_junction_node_data(nodes, px, py, port_side, name=pname)
+                        connection.junction_ports.append({"node": jname, "ratio": ratio})
+            # Legacy format: junction_ports with node references
+            elif "junction_ports" in entry:
                 connection.junction_ports = [
                     {"node": str(jp["node"]), "ratio": float(jp["ratio"])}
                     for jp in entry["junction_ports"]
@@ -5132,7 +5311,14 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
                         connection.label_y = float(wire["label_y"])
                     if "show_arrow" in wire:
                         connection.show_arrow = bool(wire["show_arrow"])
-                    if "junction_ports" in wire:
+                    # New format: ports with ratio (and optional name)
+                    if "ports" in wire:
+                        connection.pending_wire_ports = [
+                            {"ratio": float(p["ratio"]), "name": p.get("name")}
+                            for p in wire["ports"]
+                        ]
+                    # Legacy format: junction_ports with node references
+                    elif "junction_ports" in wire:
                         connection.junction_ports = [
                             {"node": str(jp["node"]), "ratio": float(jp["ratio"])}
                             for jp in wire["junction_ports"]
