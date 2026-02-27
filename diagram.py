@@ -446,21 +446,21 @@ class DiagramApp:
         if kind.startswith("MUX"):
             indent = int(sh * 0.2)
             points = [(0, 0), (sw, indent), (sw, sh - indent), (0, sh)]
-            draw.polygon(points, fill="white", outline="black", width=lw)
+            draw.polygon(points, fill=fill_color, outline=outline_color, width=lw)
             n_label = kind.split("_")[1]
 
         elif kind.startswith("DEMUX"):
             indent = int(sh * 0.2)
             points = [(0, indent), (sw, 0), (sw, sh), (0, sh - indent)]
-            draw.polygon(points, fill="white", outline="black", width=lw)
+            draw.polygon(points, fill=fill_color, outline=outline_color, width=lw)
             n_label = kind.split("_")[1]
 
         elif kind == "DFF":
-            draw.rectangle([0, 0, sw - 1, sh - 1], fill="white", outline="black", width=lw)
+            draw.rectangle([0, 0, sw - 1, sh - 1], fill=fill_color, outline=outline_color, width=lw)
             tri_y = int(sh * 0.67)
             tri_s = 12 * scale
             tri_points = [(0, tri_y - tri_s), (tri_s, tri_y), (0, tri_y + tri_s)]
-            draw.polygon(tri_points, fill="white", outline="black", width=lw)
+            draw.polygon(tri_points, fill=fill_color, outline=outline_color, width=lw)
 
         elif kind.startswith("AND"):
             import math
@@ -478,7 +478,7 @@ class DiagramApp:
                 body_pts.append((cx, cy))
             body_pts.append((mid_x, sh))
             body_pts.append((0, sh))
-            draw.polygon(body_pts, fill="white", outline="black", width=lw)
+            draw.polygon(body_pts, fill=fill_color, outline=outline_color, width=lw)
 
         elif kind.startswith("OR"):
             import math
@@ -509,7 +509,7 @@ class DiagramApp:
                 y = sh * (1 - t)
                 x = curve_depth * math.sin((1 - t) * math.pi)
                 outline.append((x, y))
-            draw.polygon(outline, fill="white", outline="black", width=lw)
+            draw.polygon(outline, fill=fill_color, outline=outline_color, width=lw)
 
         elif kind.startswith("XOR"):
             import math
@@ -541,7 +541,7 @@ class DiagramApp:
                 y = sh * (1 - t)
                 x = xor_gap + curve_depth * math.sin((1 - t) * math.pi)
                 outline.append((x, y))
-            draw.polygon(outline, fill="white", outline="black", width=lw)
+            draw.polygon(outline, fill=fill_color, outline=outline_color, width=lw)
             # Extra XOR input curve (separate, to the left of the body)
             for i in range(n_curve):
                 t0 = i / n_curve
@@ -550,7 +550,7 @@ class DiagramApp:
                 x0 = curve_depth * math.sin(t0 * math.pi)
                 y1 = t1 * sh
                 x1 = curve_depth * math.sin(t1 * math.pi)
-                draw.line([(x0, y0), (x1, y1)], fill="black", width=lw)
+                draw.line([(x0, y0), (x1, y1)], fill=outline_color, width=lw)
 
         elif kind == "INV":
             import math
@@ -559,13 +559,13 @@ class DiagramApp:
             tri_right = sw - bubble_r * 2 - lw
             margin_y = int(sh * 0.08)
             tri_pts = [(lw, margin_y), (tri_right, sh // 2), (lw, sh - margin_y)]
-            draw.polygon(tri_pts, fill="white", outline="black", width=lw)
+            draw.polygon(tri_pts, fill=fill_color, outline=outline_color, width=lw)
             # Bubble (circle) at output
             bx = tri_right + bubble_r
             by = sh // 2
             draw.ellipse(
                 [bx - bubble_r, by - bubble_r, bx + bubble_r, by + bubble_r],
-                fill="white", outline="black", width=lw
+                fill=fill_color, outline=outline_color, width=lw
             )
 
         elif kind == "CIRCLE":
@@ -588,16 +588,17 @@ class DiagramApp:
             # Cloud shape: overlapping circles traced from center
             m = lw
             cloud_circles = [
-                (0.50, 0.30, 0.28),   # top center (largest)
-                (0.25, 0.42, 0.24),   # left bump
-                (0.75, 0.42, 0.24),   # right bump
-                (0.38, 0.32, 0.23),   # fill gap top-left
-                (0.62, 0.32, 0.23),   # fill gap top-right
-                (0.15, 0.58, 0.19),   # bottom-left
-                (0.50, 0.64, 0.21),   # bottom center
-                (0.85, 0.58, 0.19),   # bottom-right
-                (0.32, 0.62, 0.18),   # fill gap bottom-left
-                (0.68, 0.62, 0.18),   # fill gap bottom-right
+                (0.50, 0.25, 0.26),   # top center bump
+                (0.30, 0.30, 0.22),   # top-left bump
+                (0.70, 0.30, 0.22),   # top-right bump
+                (0.15, 0.48, 0.22),   # left bump (widest zone)
+                (0.85, 0.48, 0.22),   # right bump (widest zone)
+                (0.38, 0.48, 0.24),   # center-left fill
+                (0.62, 0.48, 0.24),   # center-right fill
+                (0.50, 0.50, 0.25),   # center core
+                (0.25, 0.65, 0.20),   # bottom-left bump
+                (0.75, 0.65, 0.20),   # bottom-right bump
+                (0.50, 0.68, 0.20),   # bottom center bump
             ]
             # Convert fractional positions to pixel coords
             circles_px = []
@@ -635,61 +636,57 @@ class DiagramApp:
         w, h = node.width, node.height
         kind = node.kind
 
-        # For diagram shapes, pass styling parameters
-        if kind in self._DIAGRAM_SHAPES:
-            gate_img = self._render_gate_image(
-                kind, w, h, rotation=node.rotation,
-                fill_color=node.fill_color, outline_color=node.outline_color,
-                outline_width=node.outline_scale, outline_style=node.outline_style,
-            )
-        else:
-            gate_img = self._render_gate_image(kind, w, h, rotation=node.rotation)
+        # Pass styling parameters for all gates
+        gate_img = self._render_gate_image(
+            kind, w, h, rotation=node.rotation,
+            fill_color=node.fill_color, outline_color=node.outline_color,
+            outline_width=node.outline_scale, outline_style=node.outline_style,
+        )
         if gate_img:
             node.image = gate_img
             node.image_id = self.canvas.create_image(x1, y1, image=gate_img, anchor="nw")
             node.items.append(node.image_id)
         else:
             x2, y2 = x1 + w, y1 + h
-            fc = node.fill_color if kind in self._DIAGRAM_SHAPES else "white"
-            oc = node.outline_color if kind in self._DIAGRAM_SHAPES else "black"
-            olw = max(1, int(round(2 * node.outline_scale))) if kind in self._DIAGRAM_SHAPES else 2
-            dash = (4, 2) if (kind in self._DIAGRAM_SHAPES and node.outline_style == "dashed") else None
+            fc = node.fill_color
+            oc = node.outline_color
+            olw = max(1, int(round(2 * node.outline_scale)))
             if kind.startswith("MUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1, x2, y1 + indent, x2, y2 - indent, x1, y2,
-                    fill="white", outline="black", width=2,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(poly)
             elif kind.startswith("DEMUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1 + indent, x2, y1, x2, y2, x1, y2 - indent,
-                    fill="white", outline="black", width=2,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(poly)
             elif kind == "DFF":
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill="white", outline="black", width=2,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(rect)
             elif kind == "CIRCLE":
                 oval = self.canvas.create_oval(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw, dash=dash,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(oval)
             elif kind in ("RECTANGLE", "ROUNDED_RECT", "CLOUD"):
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw, dash=dash,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(rect)
             else:
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill="white", outline="black", width=2,
+                    fill=fc, outline=oc, width=olw,
                 )
                 node.items.append(rect)
         if node.resize_enabled:
@@ -730,7 +727,7 @@ class DiagramApp:
                 dash=dash,
             )
             node.items.append(rect)
-        if node.kind == "BLOCK" or node.kind in self._DIAGRAM_SHAPES:
+        if node.kind != "PORT":
             pad = 6
             h_align = getattr(node, "label_h_align", "left")
             v_align = getattr(node, "label_v_align", "top")
@@ -3322,6 +3319,7 @@ class DiagramApp:
     def _open_block_dialog(self, mode: str, node: Node | None = None):
         window = tk.Toplevel(self.root)
         window.title("Edit" if mode == "edit" else "New")
+        window.bind("<Escape>", lambda _e: window.destroy())
         mode_var = tk.StringVar(value="block")
         if mode == "create":
             tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
@@ -3334,7 +3332,9 @@ class DiagramApp:
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
 
         # --- Helper to build common UI fields on a frame starting at given row ---
-        def _build_style_fields(frame, start_row, name_height=5):
+        def _build_style_fields(frame, start_row, name_height=5,
+                                default_h_align="Left", default_v_align="Top",
+                                disable_outline_style=False):
             fields = {}
             r = start_row
             tk.Label(frame, text="Name").grid(row=r, column=0, padx=6, pady=6, sticky="nw")
@@ -3382,14 +3382,16 @@ class DiagramApp:
             fields["outline_style_menu"] = tk.OptionMenu(
                 frame, fields["outline_style_var"], "Solid", "Dashed")
             fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            if disable_outline_style:
+                fields["outline_style_menu"].configure(state="disabled")
             r += 1
             tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
-            fields["h_align_var"] = tk.StringVar(value="Left")
+            fields["h_align_var"] = tk.StringVar(value=default_h_align)
             tk.OptionMenu(frame, fields["h_align_var"], "Left", "Center", "Right").grid(
                 row=r, column=1, padx=6, pady=6, sticky="w")
             r += 1
             tk.Label(frame, text="Name V-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
-            fields["v_align_var"] = tk.StringVar(value="Top")
+            fields["v_align_var"] = tk.StringVar(value=default_v_align)
             tk.OptionMenu(frame, fields["v_align_var"], "Top", "Center", "Bottom").grid(
                 row=r, column=1, padx=6, pady=6, sticky="w")
             # Wire outline toggle
@@ -3397,7 +3399,8 @@ class DiagramApp:
                 st = "normal" if fields["outline_enabled_var"].get() else "disabled"
                 fields["outline_menu"].configure(state=st)
                 fields["outline_thickness_menu"].configure(state=st)
-                fields["outline_style_menu"].configure(state=st)
+                if not disable_outline_style:
+                    fields["outline_style_menu"].configure(state=st)
             fields["outline_enabled_var"].trace_add("write", _toggle_outline)
             _toggle_outline()
             return fields
@@ -3416,7 +3419,9 @@ class DiagramApp:
         gate_menu = tk.OptionMenu(gate_frame, gate_var, *self._gate_types())
         gate_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
         # Build same style fields for diagram frame, starting at row 1
-        gf = _build_style_fields(gate_frame, 1, name_height=2)
+        gf = _build_style_fields(gate_frame, 1, name_height=2,
+                                 default_h_align="Center", default_v_align="Center",
+                                 disable_outline_style=True)
 
         # Shorthand references for block frame (used by edit mode and block create)
         name_entry = bf["name_entry"]
@@ -3440,18 +3445,18 @@ class DiagramApp:
                 gate_frame.grid_remove()
                 block_frame.grid()
 
-        # Track whether we're editing a diagram shape
-        _editing_diagram = False
+        # Track whether we're editing a gate/diagram (non-BLOCK)
+        _editing_gate = False
 
         if mode == "create":
             mode_var.trace_add("write", _toggle_fields)
             _toggle_fields()
         else:
             # Edit mode: show the right frame based on node kind
-            if node and node.kind in self._DIAGRAM_SHAPES:
+            if node and node.kind != "BLOCK":
                 block_frame.grid_remove()
                 gate_frame.grid()
-                _editing_diagram = True
+                _editing_gate = True
             else:
                 gate_frame.grid_remove()
 
@@ -3482,7 +3487,7 @@ class DiagramApp:
             fields_dict["v_align_var"].set(getattr(src_node, "label_v_align", "top").capitalize())
 
         if node:
-            if _editing_diagram:
+            if _editing_gate:
                 _populate_fields(gf, node)
                 gate_var.set(node.kind)
             else:
@@ -3575,7 +3580,7 @@ class DiagramApp:
                 return
 
             # Editing a diagram shape
-            if _editing_diagram and node:
+            if _editing_gate and node:
                 new_name = gf["name_entry"].get("1.0", "end-1c").strip()
                 if not new_name:
                     return
