@@ -404,18 +404,25 @@ class DiagramApp:
     _CUSTOM_GATE_KINDS = ("MUX_2x1", "MUX_4x1", "DEMUX_1x2", "DEMUX_1x4", "DFF",
                           "AND2", "AND4", "OR2", "OR4", "XOR2", "XOR4", "INV")
 
-    def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0) -> "tk.PhotoImage | None":
+    def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0,
+                           fill_color: str = "white", outline_color: str = "black",
+                           outline_width: float = 1.0, outline_style: str = "solid",
+                           label_text: str = "", label_font_size: int = 12,
+                           label_font_family: str = "Arial",
+                           label_font_weight: str = "bold") -> "tk.PhotoImage | None":
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
             return None
         w = max(1, int(round(w)))
         h = max(1, int(round(h)))
+        # For 90°/270° rotation, draw at pre-rotation dimensions to avoid distortion
+        draw_w, draw_h = (h, w) if rotation in (90, 270) else (w, h)
         scale = 3
-        sw, sh = w * scale, h * scale
+        sw, sh = draw_w * scale, draw_h * scale
         img = Image.new("RGBA", (sw, sh), (255, 255, 255, 0))
         draw = ImageDraw.Draw(img)
-        lw = 2 * scale
+        lw = max(1, int(round(2 * outline_width))) * scale
 
         def _font(size, bold=False):
             weight = "bold" if bold else ""
@@ -564,17 +571,70 @@ class DiagramApp:
                 fill="white", outline="black", width=lw
             )
 
+        elif kind == "CIRCLE":
+            m = lw
+            draw.ellipse([m, m, sw - m, sh - m], fill=fill_color, outline=outline_color, width=lw)
+
+        elif kind == "RECTANGLE":
+            m = lw
+            draw.rectangle([m, m, sw - m, sh - m], fill=fill_color, outline=outline_color, width=lw)
+
+        elif kind == "ROUNDED_RECT":
+            m = lw
+            r = min(sw, sh) * 0.2
+            draw.rounded_rectangle([m, m, sw - m, sh - m], radius=r,
+                                   fill=fill_color, outline=outline_color, width=lw)
+
+        elif kind == "CLOUD":
+            import math
+            cx, cy = sw / 2, sh / 2
+            # Cloud shape: overlapping ellipses forming a cloud outline
+            bumps = 12
+            pts = []
+            for i in range(bumps * 8):
+                t = i / (bumps * 8)
+                angle = t * 2 * math.pi
+                # Base ellipse
+                bx = cx + (sw / 2 - lw * 2) * math.cos(angle)
+                by = cy + (sh / 2 - lw * 2) * math.sin(angle)
+                # Add bumps
+                bump_r = min(sw, sh) * 0.08
+                bump_angle = bumps * angle
+                bx += bump_r * math.cos(bump_angle) * math.cos(angle)
+                by += bump_r * math.cos(bump_angle) * math.sin(angle)
+                pts.append((bx, by))
+            draw.polygon(pts, fill=fill_color, outline=outline_color, width=lw)
+
+        # Draw label text for diagram shapes
+        if label_text and kind in ("CIRCLE", "RECTANGLE", "ROUNDED_RECT", "CLOUD"):
+            bold = label_font_weight == "bold"
+            fnt = _font(label_font_size, bold=bold)
+            draw.text((sw / 2, sh / 2), label_text, fill="black", font=fnt, anchor="mm")
+
         if rotation:
             img = img.rotate(-rotation, expand=True)
         img = img.resize((w, h), Image.LANCZOS)
         return ImageTk.PhotoImage(img)
+
+    _DIAGRAM_SHAPES = {"CIRCLE", "RECTANGLE", "ROUNDED_RECT", "CLOUD"}
 
     def _draw_gate_custom(self, node: Node):
         x1, y1 = node.x, node.y
         w, h = node.width, node.height
         kind = node.kind
 
-        gate_img = self._render_gate_image(kind, w, h, rotation=node.rotation)
+        # For diagram shapes, pass styling parameters
+        if kind in self._DIAGRAM_SHAPES:
+            gate_img = self._render_gate_image(
+                kind, w, h, rotation=node.rotation,
+                fill_color=node.fill_color, outline_color=node.outline_color,
+                outline_width=node.outline_scale, outline_style=node.outline_style,
+                label_text=node.name, label_font_size=node.label_font_size,
+                label_font_family=node.label_font_family,
+                label_font_weight=node.label_font_weight,
+            )
+        else:
+            gate_img = self._render_gate_image(kind, w, h, rotation=node.rotation)
         if gate_img:
             node.image = gate_img
             node.image_id = self.canvas.create_image(x1, y1, image=gate_img, anchor="nw")
@@ -1259,6 +1319,14 @@ class DiagramApp:
             if port.manual_y is not None:
                 port.manual_y += dy
         self._update_connections()
+        # Reposition junction PORTs on wires connected to this block
+        for conn in self.connections:
+            if conn.junction_ports and (
+                (conn.src and conn.src[0] == node.name) or
+                (conn.dst and conn.dst[0] == node.name)
+            ):
+                self._reposition_junctions(conn)
+        self._update_connections()
         self._draw_alignment_guides(node)
 
     def _hit_test_edge(self, node: Node, x: float, y: float, threshold: float = 6.0) -> str | None:
@@ -1624,11 +1692,19 @@ class DiagramApp:
         )
 
     def _port_position(self, node: Node, port: Port) -> tuple[float, float]:
+        import math as _math
         x1, y1 = node.x, node.y
         x2, y2 = node.x + node.width, node.y + node.height
         if port.side == "left":
             py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
-            return (x1, py)
+            px = x1
+            # Adjust for OR/XOR gate curved left side
+            kind = node.kind
+            if (y2 - y1) > 0 and (kind.startswith("OR") or kind.startswith("XOR")):
+                f = (py - y1) / (y2 - y1)
+                curve_depth = node.width * 0.15
+                px = x1 + curve_depth * _math.sin(f * _math.pi)
+            return (px, py)
         if port.side == "right":
             py = port.manual_y if port.manual_y is not None else y1 + port.offset * (y2 - y1)
             return (x2, py)
@@ -3215,7 +3291,7 @@ class DiagramApp:
         if not self._active_node_name:
             return
         node = self.nodes.get(self._active_node_name)
-        if not node or node.kind != "BLOCK":
+        if not node or node.kind == "PORT":
             return
         self._open_block_dialog(mode="edit", node=node)
 
@@ -3227,70 +3303,109 @@ class DiagramApp:
             tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
                 row=0, column=0, padx=6, pady=6, sticky="w"
             )
-            tk.Radiobutton(window, text="Gate", variable=mode_var, value="gate").grid(
+            tk.Radiobutton(window, text="Diagram", variable=mode_var, value="gate").grid(
                 row=0, column=1, padx=6, pady=6, sticky="w"
             )
 
+        color_options = list(self.COLOR_NAME_TO_HEX.keys())
+
+        # --- Helper to build common UI fields on a frame starting at given row ---
+        def _build_style_fields(frame, start_row, name_height=5):
+            fields = {}
+            r = start_row
+            tk.Label(frame, text="Name").grid(row=r, column=0, padx=6, pady=6, sticky="nw")
+            fields["name_entry"] = tk.Text(frame, height=name_height, width=24)
+            fields["name_entry"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Font Size").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["font_size_var"] = tk.IntVar(value=12)
+            tk.Spinbox(frame, from_=6, to=72, textvariable=fields["font_size_var"], width=6).grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Font").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["font_family_var"] = tk.StringVar(value="Arial")
+            tk.OptionMenu(frame, fields["font_family_var"], "Arial", "Malgun Gothic").grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Bold").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["bold_var"] = tk.BooleanVar(value=True)
+            tk.Checkbutton(frame, variable=fields["bold_var"]).grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Fill Color").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["fill_var"] = tk.StringVar(value="WHITE")
+            tk.OptionMenu(frame, fields["fill_var"], *color_options).grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Outline").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["outline_enabled_var"] = tk.BooleanVar(value=True)
+            tk.Checkbutton(frame, variable=fields["outline_enabled_var"]).grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Outline Color").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["outline_var"] = tk.StringVar(value="BLACK")
+            fields["outline_menu"] = tk.OptionMenu(frame, fields["outline_var"], *color_options)
+            fields["outline_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Outline Thickness").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["outline_thickness_var"] = tk.StringVar(value="Normal")
+            fields["outline_thickness_menu"] = tk.OptionMenu(
+                frame, fields["outline_thickness_var"], "Thin", "Normal", "Thick")
+            fields["outline_thickness_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Outline Style").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["outline_style_var"] = tk.StringVar(value="Solid")
+            fields["outline_style_menu"] = tk.OptionMenu(
+                frame, fields["outline_style_var"], "Solid", "Dashed")
+            fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["h_align_var"] = tk.StringVar(value="Left")
+            tk.OptionMenu(frame, fields["h_align_var"], "Left", "Center", "Right").grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            r += 1
+            tk.Label(frame, text="Name V-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            fields["v_align_var"] = tk.StringVar(value="Top")
+            tk.OptionMenu(frame, fields["v_align_var"], "Top", "Center", "Bottom").grid(
+                row=r, column=1, padx=6, pady=6, sticky="w")
+            # Wire outline toggle
+            def _toggle_outline(*_a):
+                st = "normal" if fields["outline_enabled_var"].get() else "disabled"
+                fields["outline_menu"].configure(state=st)
+                fields["outline_thickness_menu"].configure(state=st)
+                fields["outline_style_menu"].configure(state=st)
+            fields["outline_enabled_var"].trace_add("write", _toggle_outline)
+            _toggle_outline()
+            return fields
+
+        # --- Block frame ---
         block_frame = tk.Frame(window)
         block_frame.grid(row=1, column=0, columnspan=2, sticky="w")
+        bf = _build_style_fields(block_frame, 0)
+
+        # --- Diagram (gate) frame ---
         gate_frame = tk.Frame(window)
         gate_frame.grid(row=1, column=0, columnspan=2, sticky="w")
 
-        tk.Label(block_frame, text="Name").grid(row=0, column=0, padx=6, pady=6, sticky="nw")
-        name_entry = tk.Text(block_frame, height=5, width=24)
-        name_entry.grid(row=0, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Font Size").grid(row=1, column=0, padx=6, pady=6, sticky="w")
-        font_size_var = tk.IntVar(value=12)
-        font_size_spin = tk.Spinbox(block_frame, from_=6, to=72, textvariable=font_size_var, width=6)
-        font_size_spin.grid(row=1, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Font").grid(row=2, column=0, padx=6, pady=6, sticky="w")
-        font_family_var = tk.StringVar(value="Arial")
-        font_menu = tk.OptionMenu(block_frame, font_family_var, "Arial", "Malgun Gothic")
-        font_menu.grid(row=2, column=1, padx=6, pady=6, sticky="w")
-        bold_var = tk.BooleanVar(value=True)
-        bold_check = tk.Checkbutton(block_frame, text="Bold", variable=bold_var)
-        bold_check.grid(row=3, column=1, padx=6, pady=6, sticky="w")
-        color_options = list(self.COLOR_NAME_TO_HEX.keys())
-        fill_var = tk.StringVar(value="WHITE")
-        tk.Label(block_frame, text="Fill Color").grid(row=4, column=0, padx=6, pady=6, sticky="w")
-        fill_menu = tk.OptionMenu(block_frame, fill_var, *color_options)
-        fill_menu.grid(row=4, column=1, padx=6, pady=6, sticky="w")
-
-        outline_enabled_var = tk.BooleanVar(value=True)
-        tk.Label(block_frame, text="Outline").grid(row=5, column=0, padx=6, pady=6, sticky="w")
-        outline_check = tk.Checkbutton(block_frame, variable=outline_enabled_var)
-        outline_check.grid(row=5, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Outline Color").grid(row=6, column=0, padx=6, pady=6, sticky="w")
-        outline_var = tk.StringVar(value="BLACK")
-        outline_menu = tk.OptionMenu(block_frame, outline_var, *color_options)
-        outline_menu.grid(row=6, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Outline Thickness").grid(row=7, column=0, padx=6, pady=6, sticky="w")
-        outline_thickness_var = tk.StringVar(value="Normal")
-        outline_thickness_menu = tk.OptionMenu(block_frame, outline_thickness_var, "Thin", "Normal", "Thick")
-        outline_thickness_menu.grid(row=7, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Outline Style").grid(row=8, column=0, padx=6, pady=6, sticky="w")
-        outline_style_var = tk.StringVar(value="Solid")
-        outline_style_menu = tk.OptionMenu(block_frame, outline_style_var, "Solid", "Dashed")
-        outline_style_menu.grid(row=8, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Name H-Align").grid(row=9, column=0, padx=6, pady=6, sticky="w")
-        h_align_var = tk.StringVar(value="Left")
-        h_align_menu = tk.OptionMenu(block_frame, h_align_var, "Left", "Center", "Right")
-        h_align_menu.grid(row=9, column=1, padx=6, pady=6, sticky="w")
-        tk.Label(block_frame, text="Name V-Align").grid(row=10, column=0, padx=6, pady=6, sticky="w")
-        v_align_var = tk.StringVar(value="Top")
-        v_align_menu = tk.OptionMenu(block_frame, v_align_var, "Top", "Center", "Bottom")
-        v_align_menu.grid(row=10, column=1, padx=6, pady=6, sticky="w")
-
-        tk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        tk.Label(gate_frame, text="Diagram Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
         gate_var = tk.StringVar(value="AND2")
         gate_menu = tk.OptionMenu(gate_frame, gate_var, *self._gate_types())
         gate_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        # Build same style fields for diagram frame, starting at row 1
+        gf = _build_style_fields(gate_frame, 1, name_height=2)
 
-        def _toggle_outline_fields(*_args):
-            state = "normal" if outline_enabled_var.get() else "disabled"
-            outline_menu.configure(state=state)
-            outline_thickness_menu.configure(state=state)
-            outline_style_menu.configure(state=state)
+        # Shorthand references for block frame (used by edit mode and block create)
+        name_entry = bf["name_entry"]
+        font_size_var = bf["font_size_var"]
+        font_family_var = bf["font_family_var"]
+        bold_var = bf["bold_var"]
+        fill_var = bf["fill_var"]
+        outline_enabled_var = bf["outline_enabled_var"]
+        outline_var = bf["outline_var"]
+        outline_thickness_var = bf["outline_thickness_var"]
+        outline_style_var = bf["outline_style_var"]
+        h_align_var = bf["h_align_var"]
+        v_align_var = bf["v_align_var"]
 
         def _toggle_fields(*_args):
             is_gate = mode_var.get() == "gate"
@@ -3306,9 +3421,6 @@ class DiagramApp:
             _toggle_fields()
         else:
             gate_frame.grid_remove()
-
-        outline_enabled_var.trace_add("write", _toggle_outline_fields)
-        _toggle_outline_fields()
 
         def _unique_gate_name(kind: str) -> str:
             index = 1
@@ -3350,10 +3462,26 @@ class DiagramApp:
             target.label_v_align = v_align_var.get().lower()
             self._redraw_node(target)
 
+        def _apply_gate_style(target: Node):
+            """Apply style fields from the diagram (gate) frame to a node."""
+            target.label_font_size = gf["font_size_var"].get()
+            target.label_font_family = gf["font_family_var"].get()
+            target.label_font_weight = "bold" if gf["bold_var"].get() else "normal"
+            target.fill_color = self._color_to_hex(gf["fill_var"].get())
+            target.outline_color = self._color_to_hex(gf["outline_var"].get())
+            thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
+            target.outline_scale = thickness_map.get(gf["outline_thickness_var"].get(), 1.0)
+            target.outline_style = "dashed" if gf["outline_style_var"].get() == "Dashed" else "solid"
+            target.outline_enabled = gf["outline_enabled_var"].get()
+            target.label_h_align = gf["h_align_var"].get().lower()
+            target.label_v_align = gf["v_align_var"].get().lower()
+
         def _create_or_edit():
             if mode == "create" and mode_var.get() == "gate":
                 gate_kind = gate_var.get()
-                name = _unique_gate_name(gate_kind)
+                # Use name from diagram name field, or auto-generate
+                custom_name = gf["name_entry"].get("1.0", "end-1c").strip()
+                name = custom_name if custom_name and custom_name not in self.nodes else _unique_gate_name(gate_kind)
                 gate_def = self._gate_definitions()[gate_kind]
                 inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
                 outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
@@ -3382,6 +3510,7 @@ class DiagramApp:
                     label_font_weight="bold",
                     level=self._next_level(),
                 )
+                _apply_gate_style(new_node)
                 _align_gate_to_grid(new_node)
                 self.nodes[name] = new_node
                 self._draw_node(new_node)
@@ -4839,6 +4968,10 @@ class DiagramApp:
             "DEMUX_1x4": {"inputs": 1, "outputs": 4, "width": 60, "height": 90},
             "DFF": {"inputs": 2, "outputs": 1, "width": 60, "height": 60},
             "INV": {"inputs": 1, "outputs": 1, "width": 60, "height": 50},
+            "CIRCLE": {"inputs": 0, "outputs": 0, "width": 80, "height": 80},
+            "RECTANGLE": {"inputs": 0, "outputs": 0, "width": 120, "height": 80},
+            "ROUNDED_RECT": {"inputs": 0, "outputs": 0, "width": 120, "height": 80},
+            "CLOUD": {"inputs": 0, "outputs": 0, "width": 120, "height": 80},
         }
 
     def _content_bbox(self):
