@@ -1,7 +1,7 @@
 import json
 import sys
 import tkinter as tk
-from tkinter import simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -406,10 +406,7 @@ class DiagramApp:
 
     def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0,
                            fill_color: str = "white", outline_color: str = "black",
-                           outline_width: float = 1.0, outline_style: str = "solid",
-                           label_text: str = "", label_font_size: int = 12,
-                           label_font_family: str = "Arial",
-                           label_font_weight: str = "bold") -> "tk.PhotoImage | None":
+                           outline_width: float = 1.0, outline_style: str = "solid") -> "tk.PhotoImage | None":
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
@@ -588,28 +585,43 @@ class DiagramApp:
         elif kind == "CLOUD":
             import math
             cx, cy = sw / 2, sh / 2
-            # Cloud shape: overlapping ellipses forming a cloud outline
-            bumps = 12
+            # Cloud shape: overlapping circles traced from center
+            m = lw
+            cloud_circles = [
+                (0.50, 0.30, 0.28),   # top center (largest)
+                (0.25, 0.42, 0.24),   # left bump
+                (0.75, 0.42, 0.24),   # right bump
+                (0.38, 0.32, 0.23),   # fill gap top-left
+                (0.62, 0.32, 0.23),   # fill gap top-right
+                (0.15, 0.58, 0.19),   # bottom-left
+                (0.50, 0.64, 0.21),   # bottom center
+                (0.85, 0.58, 0.19),   # bottom-right
+                (0.32, 0.62, 0.18),   # fill gap bottom-left
+                (0.68, 0.62, 0.18),   # fill gap bottom-right
+            ]
+            # Convert fractional positions to pixel coords
+            circles_px = []
+            for (cxf, cyf, rf) in cloud_circles:
+                circles_px.append((cxf * sw, cyf * sh, rf * min(sw, sh)))
+            # Trace outer boundary by ray-casting from center
+            n_pts = 720
             pts = []
-            for i in range(bumps * 8):
-                t = i / (bumps * 8)
-                angle = t * 2 * math.pi
-                # Base ellipse
-                bx = cx + (sw / 2 - lw * 2) * math.cos(angle)
-                by = cy + (sh / 2 - lw * 2) * math.sin(angle)
-                # Add bumps
-                bump_r = min(sw, sh) * 0.08
-                bump_angle = bumps * angle
-                bx += bump_r * math.cos(bump_angle) * math.cos(angle)
-                by += bump_r * math.cos(bump_angle) * math.sin(angle)
-                pts.append((bx, by))
+            for i in range(n_pts):
+                angle = 2 * math.pi * i / n_pts
+                cos_a = math.cos(angle)
+                sin_a = math.sin(angle)
+                max_r = 0
+                for (ccx, ccy, cr) in circles_px:
+                    dx = ccx - cx
+                    dy = ccy - cy
+                    proj = dx * cos_a + dy * sin_a
+                    perp = abs(-dx * sin_a + dy * cos_a)
+                    if perp < cr:
+                        extend = proj + math.sqrt(cr * cr - perp * perp)
+                        if extend > max_r:
+                            max_r = extend
+                pts.append((cx + max_r * cos_a, cy + max_r * sin_a))
             draw.polygon(pts, fill=fill_color, outline=outline_color, width=lw)
-
-        # Draw label text for diagram shapes
-        if label_text and kind in ("CIRCLE", "RECTANGLE", "ROUNDED_RECT", "CLOUD"):
-            bold = label_font_weight == "bold"
-            fnt = _font(label_font_size, bold=bold)
-            draw.text((sw / 2, sh / 2), label_text, fill="black", font=fnt, anchor="mm")
 
         if rotation:
             img = img.rotate(-rotation, expand=True)
@@ -629,9 +641,6 @@ class DiagramApp:
                 kind, w, h, rotation=node.rotation,
                 fill_color=node.fill_color, outline_color=node.outline_color,
                 outline_width=node.outline_scale, outline_style=node.outline_style,
-                label_text=node.name, label_font_size=node.label_font_size,
-                label_font_family=node.label_font_family,
-                label_font_weight=node.label_font_weight,
             )
         else:
             gate_img = self._render_gate_image(kind, w, h, rotation=node.rotation)
@@ -641,31 +650,46 @@ class DiagramApp:
             node.items.append(node.image_id)
         else:
             x2, y2 = x1 + w, y1 + h
-            lw = 2
+            fc = node.fill_color if kind in self._DIAGRAM_SHAPES else "white"
+            oc = node.outline_color if kind in self._DIAGRAM_SHAPES else "black"
+            olw = max(1, int(round(2 * node.outline_scale))) if kind in self._DIAGRAM_SHAPES else 2
+            dash = (4, 2) if (kind in self._DIAGRAM_SHAPES and node.outline_style == "dashed") else None
             if kind.startswith("MUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1, x2, y1 + indent, x2, y2 - indent, x1, y2,
-                    fill="white", outline="black", width=lw,
+                    fill="white", outline="black", width=2,
                 )
                 node.items.append(poly)
             elif kind.startswith("DEMUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1 + indent, x2, y1, x2, y2, x1, y2 - indent,
-                    fill="white", outline="black", width=lw,
+                    fill="white", outline="black", width=2,
                 )
                 node.items.append(poly)
             elif kind == "DFF":
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill="white", outline="black", width=lw,
+                    fill="white", outline="black", width=2,
+                )
+                node.items.append(rect)
+            elif kind == "CIRCLE":
+                oval = self.canvas.create_oval(
+                    x1, y1, x2, y2,
+                    fill=fc, outline=oc, width=olw, dash=dash,
+                )
+                node.items.append(oval)
+            elif kind in ("RECTANGLE", "ROUNDED_RECT", "CLOUD"):
+                rect = self.canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill=fc, outline=oc, width=olw, dash=dash,
                 )
                 node.items.append(rect)
             else:
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill="white", outline="black", width=lw,
+                    fill="white", outline="black", width=2,
                 )
                 node.items.append(rect)
         if node.resize_enabled:
@@ -706,7 +730,7 @@ class DiagramApp:
                 dash=dash,
             )
             node.items.append(rect)
-        if node.kind == "BLOCK":
+        if node.kind == "BLOCK" or node.kind in self._DIAGRAM_SHAPES:
             pad = 6
             h_align = getattr(node, "label_h_align", "left")
             v_align = getattr(node, "label_v_align", "top")
@@ -3416,11 +3440,20 @@ class DiagramApp:
                 gate_frame.grid_remove()
                 block_frame.grid()
 
+        # Track whether we're editing a diagram shape
+        _editing_diagram = False
+
         if mode == "create":
             mode_var.trace_add("write", _toggle_fields)
             _toggle_fields()
         else:
-            gate_frame.grid_remove()
+            # Edit mode: show the right frame based on node kind
+            if node and node.kind in self._DIAGRAM_SHAPES:
+                block_frame.grid_remove()
+                gate_frame.grid()
+                _editing_diagram = True
+            else:
+                gate_frame.grid_remove()
 
         def _unique_gate_name(kind: str) -> str:
             index = 1
@@ -3433,19 +3466,27 @@ class DiagramApp:
         def _align_gate_to_grid(target: Node):
             self._align_gate_ports_to_grid(target)
 
-        if node:
-            name_entry.insert("1.0", node.name)
-            font_size_var.set(node.label_font_size)
-            font_family_var.set(node.label_font_family)
-            bold_var.set(node.label_font_weight == "bold")
-            fill_var.set(self._color_to_name(node.fill_color))
-            outline_var.set(self._color_to_name(node.outline_color))
-            outline_enabled_var.set(node.outline_enabled)
+        def _populate_fields(fields_dict, src_node):
+            """Populate a set of style fields from a node."""
+            fields_dict["name_entry"].insert("1.0", src_node.name)
+            fields_dict["font_size_var"].set(src_node.label_font_size)
+            fields_dict["font_family_var"].set(src_node.label_font_family)
+            fields_dict["bold_var"].set(src_node.label_font_weight == "bold")
+            fields_dict["fill_var"].set(self._color_to_name(src_node.fill_color))
+            fields_dict["outline_var"].set(self._color_to_name(src_node.outline_color))
+            fields_dict["outline_enabled_var"].set(src_node.outline_enabled)
             thickness_map = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
-            outline_thickness_var.set(thickness_map.get(node.outline_scale, "Normal"))
-            outline_style_var.set("Dashed" if node.outline_style == "dashed" else "Solid")
-            h_align_var.set(getattr(node, "label_h_align", "left").capitalize())
-            v_align_var.set(getattr(node, "label_v_align", "top").capitalize())
+            fields_dict["outline_thickness_var"].set(thickness_map.get(src_node.outline_scale, "Normal"))
+            fields_dict["outline_style_var"].set("Dashed" if src_node.outline_style == "dashed" else "Solid")
+            fields_dict["h_align_var"].set(getattr(src_node, "label_h_align", "left").capitalize())
+            fields_dict["v_align_var"].set(getattr(src_node, "label_v_align", "top").capitalize())
+
+        if node:
+            if _editing_diagram:
+                _populate_fields(gf, node)
+                gate_var.set(node.kind)
+            else:
+                _populate_fields(bf, node)
 
         def _apply_block_changes(target: Node, new_name: str):
             target.name = new_name
@@ -3481,12 +3522,26 @@ class DiagramApp:
                 gate_kind = gate_var.get()
                 # Use name from diagram name field, or auto-generate
                 custom_name = gf["name_entry"].get("1.0", "end-1c").strip()
-                name = custom_name if custom_name and custom_name not in self.nodes else _unique_gate_name(gate_kind)
+                if custom_name and custom_name in self.nodes:
+                    messagebox.showerror("Error", f"Name '{custom_name}' already exists.", parent=window)
+                    return
+                name = custom_name if custom_name else _unique_gate_name(gate_kind)
                 gate_def = self._gate_definitions()[gate_kind]
-                inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
-                outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
-                _assign_port_offsets(inputs, "left")
-                _assign_port_offsets(outputs, "right")
+                # Diagram shapes get 1 port on each side (top/bottom/left/right)
+                if gate_kind in self._DIAGRAM_SHAPES:
+                    inputs = [
+                        Port(name="left", kind="in", side="left", offset=0.5),
+                        Port(name="top", kind="in", side="top", offset=0.5),
+                    ]
+                    outputs = [
+                        Port(name="right", kind="out", side="right", offset=0.5),
+                        Port(name="bottom", kind="out", side="bottom", offset=0.5),
+                    ]
+                else:
+                    inputs = [Port(name=f"in{idx}", kind="in") for idx in range(1, gate_def["inputs"] + 1)]
+                    outputs = [Port(name=f"out{idx}", kind="out") for idx in range(1, gate_def["outputs"] + 1)]
+                    _assign_port_offsets(inputs, "left")
+                    _assign_port_offsets(outputs, "right")
                 width = gate_def["width"]
                 height = gate_def["height"]
                 x, y = self._next_block_position()
@@ -3519,11 +3574,31 @@ class DiagramApp:
                 window.destroy()
                 return
 
+            # Editing a diagram shape
+            if _editing_diagram and node:
+                new_name = gf["name_entry"].get("1.0", "end-1c").strip()
+                if not new_name:
+                    return
+                if new_name != node.name and new_name in self.nodes:
+                    messagebox.showerror("Error", f"Name '{new_name}' already exists.", parent=window)
+                    return
+                old_name = node.name
+                node.name = new_name
+                _apply_gate_style(node)
+                self._redraw_node(node)
+                if new_name != old_name:
+                    self._rename_node(old_name, new_name)
+                self._apply_z_order(active_node_name=node.name)
+                self._record_history()
+                window.destroy()
+                return
+
             new_name = name_entry.get("1.0", "end-1c").strip()
             if not new_name:
                 return
             if mode == "create":
                 if new_name in self.nodes:
+                    messagebox.showerror("Error", f"Name '{new_name}' already exists.", parent=window)
                     return
                 x, y = self._next_block_position()
                 new_node = Node(
@@ -3545,6 +3620,7 @@ class DiagramApp:
                 window.destroy()
                 return
             if node and new_name != node.name and new_name in self.nodes:
+                messagebox.showerror("Error", f"Name '{new_name}' already exists.", parent=window)
                 return
             if node:
                 old_name = node.name
