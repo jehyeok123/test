@@ -407,7 +407,7 @@ class DiagramApp:
 
     def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0,
                            fill_color: str = "white", outline_color: str = "black",
-                           outline_width: float = 1.0, outline_style: str = "solid") -> "tk.PhotoImage | None":
+                           outline_width: float = 1.0) -> "tk.PhotoImage | None":
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
@@ -585,9 +585,11 @@ class DiagramApp:
 
         elif kind == "CLOUD":
             import math
+            # Add margin so outline isn't clipped at edges
+            margin = lw * 2
+            iw, ih = sw - margin * 2, sh - margin * 2
             cx, cy = sw / 2, sh / 2
             # Cloud shape: overlapping circles traced from center
-            m = lw
             # Top half bumps (mirrored to bottom for symmetry)
             top_bumps = [
                 (0.50, 0.25, 0.26),   # top center bump
@@ -604,10 +606,10 @@ class DiagramApp:
             for (bx, by, br) in top_bumps:
                 cloud_circles.append((bx, by, br))
                 cloud_circles.append((bx, 1.0 - by, br))  # mirror to bottom
-            # Convert fractional positions to pixel coords
+            # Convert fractional positions to pixel coords within margin
             circles_px = []
             for (cxf, cyf, rf) in cloud_circles:
-                circles_px.append((cxf * sw, cyf * sh, rf * min(sw, sh)))
+                circles_px.append((margin + cxf * iw, margin + cyf * ih, rf * min(iw, ih)))
             # Trace outer boundary by ray-casting from center
             n_pts = 720
             pts = []
@@ -644,7 +646,7 @@ class DiagramApp:
         gate_img = self._render_gate_image(
             kind, w, h, rotation=node.rotation,
             fill_color=node.fill_color, outline_color=node.outline_color,
-            outline_width=node.outline_scale, outline_style=node.outline_style,
+            outline_width=node.outline_scale,
         )
         if gate_img:
             node.image = gate_img
@@ -713,7 +715,6 @@ class DiagramApp:
         else:
             base_width = 4 if node.resize_enabled else 2
             outline_width = max(1, base_width * node.outline_scale)
-            dash = (4, 2) if node.outline_style == "dashed" else None
             if node.resize_enabled:
                 outline = "black"
                 width = outline_width
@@ -728,7 +729,6 @@ class DiagramApp:
                 fill=node.fill_color,
                 outline=outline,
                 width=width,
-                dash=dash,
             )
             node.items.append(rect)
         if node.kind != "PORT" and getattr(node, "show_name", True):
@@ -3413,12 +3413,6 @@ class DiagramApp:
                 frame, fields["outline_thickness_var"], "Thin", "Normal", "Thick")
             fields["outline_thickness_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Outline Style").grid(row=r, column=0, padx=6, pady=3, sticky="w")
-            fields["outline_style_var"] = tk.StringVar(value="Solid")
-            fields["outline_style_menu"] = tk.OptionMenu(
-                frame, fields["outline_style_var"], "Solid", "Dashed")
-            fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
-            r += 1
             tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["h_align_var"] = tk.StringVar(value=default_h_align)
             tk.OptionMenu(frame, fields["h_align_var"], "Left", "Center", "Right").grid(
@@ -3434,7 +3428,6 @@ class DiagramApp:
                 for child in fields["outline_color_bar"].winfo_children():
                     child.configure(state=st)
                 fields["outline_thickness_menu"].configure(state=st)
-                fields["outline_style_menu"].configure(state=st)
             fields["outline_enabled_var"].trace_add("write", _toggle_outline)
             _toggle_outline()
             return fields
@@ -3466,7 +3459,6 @@ class DiagramApp:
         outline_enabled_var = bf["outline_enabled_var"]
         outline_var = bf["outline_var"]
         outline_thickness_var = bf["outline_thickness_var"]
-        outline_style_var = bf["outline_style_var"]
         h_align_var = bf["h_align_var"]
         v_align_var = bf["v_align_var"]
 
@@ -3517,7 +3509,6 @@ class DiagramApp:
             fields_dict["outline_enabled_var"].set(src_node.outline_enabled)
             thickness_map = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
             fields_dict["outline_thickness_var"].set(thickness_map.get(src_node.outline_scale, "Normal"))
-            fields_dict["outline_style_var"].set("Dashed" if src_node.outline_style == "dashed" else "Solid")
             fields_dict["h_align_var"].set(getattr(src_node, "label_h_align", "left").capitalize())
             fields_dict["v_align_var"].set(getattr(src_node, "label_v_align", "top").capitalize())
 
@@ -3539,7 +3530,6 @@ class DiagramApp:
             target.outline_color = self._color_to_hex(outline_var.get())
             thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
             target.outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
-            target.outline_style = "dashed" if outline_style_var.get() == "Dashed" else "solid"
             target.outline_enabled = outline_enabled_var.get()
             target.label_h_align = h_align_var.get().lower()
             target.label_v_align = v_align_var.get().lower()
@@ -3555,7 +3545,6 @@ class DiagramApp:
             target.outline_color = self._color_to_hex(gf["outline_var"].get())
             thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
             target.outline_scale = thickness_map.get(gf["outline_thickness_var"].get(), 1.0)
-            target.outline_style = "dashed" if gf["outline_style_var"].get() == "Dashed" else "solid"
             target.outline_enabled = gf["outline_enabled_var"].get()
             target.label_h_align = gf["h_align_var"].get().lower()
             target.label_v_align = gf["v_align_var"].get().lower()
