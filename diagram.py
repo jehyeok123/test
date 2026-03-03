@@ -41,6 +41,7 @@ class Node:
     label_font_weight: str = "bold"
     label_h_align: str = "left"
     label_v_align: str = "top"
+    show_name: bool = True
     level: int = 0
     rotation: int = 0
     image: tk.PhotoImage | None = None
@@ -730,7 +731,7 @@ class DiagramApp:
                 dash=dash,
             )
             node.items.append(rect)
-        if node.kind != "PORT":
+        if node.kind != "PORT" and getattr(node, "show_name", True):
             pad = 6
             h_align = getattr(node, "label_h_align", "left")
             v_align = getattr(node, "label_v_align", "top")
@@ -3365,9 +3366,15 @@ class DiagramApp:
 
         # --- Helper to build common UI fields on a frame starting at given row ---
         def _build_style_fields(frame, start_row, name_height=5,
-                                default_h_align="Left", default_v_align="Top"):
+                                default_h_align="Left", default_v_align="Top",
+                                default_show_name=True):
             fields = {}
             r = start_row
+            tk.Label(frame, text="Show Name").grid(row=r, column=0, padx=6, pady=3, sticky="w")
+            fields["show_name_var"] = tk.BooleanVar(value=default_show_name)
+            tk.Checkbutton(frame, variable=fields["show_name_var"]).grid(
+                row=r, column=1, padx=6, pady=3, sticky="w")
+            r += 1
             tk.Label(frame, text="Name").grid(row=r, column=0, padx=6, pady=6, sticky="nw")
             fields["name_entry"] = tk.Text(frame, height=name_height, width=24)
             fields["name_entry"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
@@ -3447,7 +3454,8 @@ class DiagramApp:
         gate_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
         # Build same style fields for diagram frame, starting at row 1
         gf = _build_style_fields(gate_frame, 1, name_height=2,
-                                 default_h_align="Center", default_v_align="Center")
+                                 default_h_align="Center", default_v_align="Center",
+                                 default_show_name=False)
 
         # Shorthand references for block frame (used by edit mode and block create)
         name_entry = bf["name_entry"]
@@ -3499,6 +3507,7 @@ class DiagramApp:
 
         def _populate_fields(fields_dict, src_node):
             """Populate a set of style fields from a node."""
+            fields_dict["show_name_var"].set(getattr(src_node, "show_name", True))
             fields_dict["name_entry"].insert("1.0", src_node.name)
             fields_dict["font_size_var"].set(src_node.label_font_size)
             fields_dict["font_family_var"].set(src_node.label_font_family)
@@ -3516,11 +3525,13 @@ class DiagramApp:
             if _editing_gate:
                 _populate_fields(gf, node)
                 gate_var.set(node.kind)
+                gate_menu.configure(state="disabled")
             else:
                 _populate_fields(bf, node)
 
         def _apply_block_changes(target: Node, new_name: str):
             target.name = new_name
+            target.show_name = bf["show_name_var"].get()
             target.label_font_size = font_size_var.get()
             target.label_font_family = font_family_var.get()
             target.label_font_weight = "bold" if bold_var.get() else "normal"
@@ -3536,6 +3547,7 @@ class DiagramApp:
 
         def _apply_gate_style(target: Node):
             """Apply style fields from the diagram (gate) frame to a node."""
+            target.show_name = gf["show_name_var"].get()
             target.label_font_size = gf["font_size_var"].get()
             target.label_font_family = gf["font_family_var"].get()
             target.label_font_weight = "bold" if gf["bold_var"].get() else "normal"
@@ -4818,6 +4830,7 @@ class DiagramApp:
                     "rotation": node.rotation,
                     "label_h_align": getattr(node, "label_h_align", "left"),
                     "label_v_align": getattr(node, "label_v_align", "top"),
+                    "show_name": getattr(node, "show_name", True),
                 }
             )
         blocks.sort(key=lambda block: block["level"])
@@ -5439,6 +5452,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
         rotation = int(block.get("rotation", 0) or 0)
         label_h_align = str(block.get("label_h_align", "left"))
         label_v_align = str(block.get("label_v_align", "top"))
+        show_name = bool(block.get("show_name", True))
         node = Node(
             name=name,
             kind=kind,
@@ -5459,6 +5473,7 @@ def parse_data(data: dict[str, object]) -> tuple[dict[str, Node], list[Connectio
             label_font_weight=font_weight,
             label_h_align=label_h_align,
             label_v_align=label_v_align,
+            show_name=show_name,
             level=int(level) if level is not None else 0,
             rotation=rotation,
         )
