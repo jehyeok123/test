@@ -78,6 +78,7 @@ class DiagramApp:
     MID_STEP = 5
     PORT_RADIUS = 5
     COLOR_NAME_TO_HEX = {
+        "NONE": "",
         "GRAY": "#BBBBBB",
         "BLUE": "blue",
         "RED": "red",
@@ -86,7 +87,7 @@ class DiagramApp:
         "YELLOW": "yellow",
         "WHITE": "white",
     }
-    COLOR_HEX_TO_NAME = {value.lower(): key for key, value in COLOR_NAME_TO_HEX.items()}
+    COLOR_HEX_TO_NAME = {value.lower(): key for key, value in COLOR_NAME_TO_HEX.items() if value}
 
     def __init__(
         self,
@@ -407,7 +408,8 @@ class DiagramApp:
 
     def _render_gate_image(self, kind: str, w: int, h: int, rotation: int = 0,
                            fill_color: str = "white", outline_color: str = "black",
-                           outline_width: float = 1.0) -> "tk.PhotoImage | None":
+                           outline_width: float = 1.0,
+                           outline_style: str = "solid") -> "tk.PhotoImage | None":
         try:
             from PIL import Image, ImageDraw, ImageFont, ImageTk
         except ImportError:
@@ -421,6 +423,9 @@ class DiagramApp:
         img = Image.new("RGBA", (sw, sh), (255, 255, 255, 0))
         draw = ImageDraw.Draw(img)
         lw = max(1, int(round(2 * outline_width))) * scale
+        # Handle transparent fill
+        if not fill_color or fill_color.lower() in ("none", "transparent", ""):
+            fill_color = (255, 255, 255, 0)
 
         def _font(size, bold=False):
             weight = "bold" if bold else ""
@@ -570,23 +575,23 @@ class DiagramApp:
             )
 
         elif kind == "CIRCLE":
-            m = lw
-            draw.ellipse([m, m, sw - m, sh - m], fill=fill_color, outline=outline_color, width=lw)
+            hlw = lw // 2
+            draw.ellipse([hlw, hlw, sw - hlw, sh - hlw], fill=fill_color, outline=outline_color, width=lw)
 
         elif kind == "RECTANGLE":
-            m = lw
-            draw.rectangle([m, m, sw - m, sh - m], fill=fill_color, outline=outline_color, width=lw)
+            hlw = lw // 2
+            draw.rectangle([hlw, hlw, sw - hlw, sh - hlw], fill=fill_color, outline=outline_color, width=lw)
 
         elif kind == "ROUNDED_RECT":
-            m = lw
+            hlw = lw // 2
             r = min(sw, sh) * 0.2
-            draw.rounded_rectangle([m, m, sw - m, sh - m], radius=r,
+            draw.rounded_rectangle([hlw, hlw, sw - hlw, sh - hlw], radius=r,
                                    fill=fill_color, outline=outline_color, width=lw)
 
         elif kind == "CLOUD":
             import math
-            # Add margin so outline isn't clipped at edges
-            margin = lw * 2
+            # Small margin to prevent outline clipping at edges
+            margin = lw
             iw, ih = sw - margin * 2, sh - margin * 2
             cx, cy = sw / 2, sh / 2
             # Cloud shape: overlapping circles traced from center
@@ -641,12 +646,20 @@ class DiagramApp:
         x1, y1 = node.x, node.y
         w, h = node.width, node.height
         kind = node.kind
+        is_dashed = getattr(node, "outline_style", "solid") == "dashed"
+        dash_pat = (8, 4) if is_dashed else ()
 
-        # Pass styling parameters for all gates
+        # For dashed outlines, render PIL image without visible outline,
+        # then draw canvas outline with dash on top
+        pil_oc = node.outline_color
+        if is_dashed:
+            # Hide PIL outline; we'll draw dashed outline via canvas
+            pil_oc = node.fill_color if node.fill_color else "white"
         gate_img = self._render_gate_image(
             kind, w, h, rotation=node.rotation,
-            fill_color=node.fill_color, outline_color=node.outline_color,
+            fill_color=node.fill_color, outline_color=pil_oc,
             outline_width=node.outline_scale,
+            outline_style=node.outline_style,
         )
         if gate_img:
             node.image = gate_img
@@ -657,54 +670,73 @@ class DiagramApp:
             fc = node.fill_color
             oc = node.outline_color
             olw = max(1, int(round(2 * node.outline_scale)))
+            dash_kw = {"dash": dash_pat} if dash_pat else {}
             if kind.startswith("MUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1, x2, y1 + indent, x2, y2 - indent, x1, y2,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(poly)
             elif kind.startswith("DEMUX"):
                 indent = h * 0.2
                 poly = self.canvas.create_polygon(
                     x1, y1 + indent, x2, y1, x2, y2, x1, y2 - indent,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(poly)
             elif kind == "DFF":
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(rect)
             elif kind == "CIRCLE":
                 oval = self.canvas.create_oval(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(oval)
             elif kind in ("RECTANGLE", "ROUNDED_RECT", "CLOUD"):
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(rect)
             else:
                 rect = self.canvas.create_rectangle(
                     x1, y1, x2, y2,
-                    fill=fc, outline=oc, width=olw,
+                    fill=fc, outline=oc, width=olw, **dash_kw,
                 )
                 node.items.append(rect)
+        # For dashed outlines on PIL-rendered shapes, overlay canvas outline with dash
+        if gate_img and is_dashed:
+            olw = max(1, int(round(2 * node.outline_scale)))
+            if kind == "CIRCLE":
+                dash_item = self.canvas.create_oval(
+                    x1, y1, x1 + w, y1 + h,
+                    outline=node.outline_color, width=olw, dash=dash_pat,
+                )
+            else:
+                dash_item = self.canvas.create_rectangle(
+                    x1, y1, x1 + w, y1 + h,
+                    outline=node.outline_color, width=olw, dash=dash_pat,
+                )
+            node.items.append(dash_item)
         if node.resize_enabled:
             outline_width = max(2, int(round(2 * node.outline_scale)))
-            outline_rect = self.canvas.create_rectangle(
-                x1,
-                y1,
-                x1 + w,
-                y1 + h,
-                outline="black",
-                width=outline_width,
-            )
+            # For diagram shapes, the PIL image already extends to edges,
+            # so use a blue dashed resize indicator instead of double-line black rect
+            if kind in self._DIAGRAM_SHAPES:
+                outline_rect = self.canvas.create_rectangle(
+                    x1, y1, x1 + w, y1 + h,
+                    outline="#4488CC", width=outline_width, dash=(6, 3),
+                )
+            else:
+                outline_rect = self.canvas.create_rectangle(
+                    x1, y1, x1 + w, y1 + h,
+                    outline="black", width=outline_width,
+                )
             node.items.append(outline_rect)
 
     def _draw_node(self, node: Node):
@@ -721,6 +753,9 @@ class DiagramApp:
             else:
                 outline = node.outline_color if node.outline_enabled else ""
                 width = outline_width if node.outline_enabled else 0
+            dash_kw = {}
+            if getattr(node, "outline_style", "solid") == "dashed" and not node.resize_enabled:
+                dash_kw["dash"] = (8, 4)
             rect = self.canvas.create_rectangle(
                 x1,
                 y1,
@@ -729,6 +764,7 @@ class DiagramApp:
                 fill=node.fill_color,
                 outline=outline,
                 width=width,
+                **dash_kw,
             )
             node.items.append(rect)
         if node.kind != "PORT" and getattr(node, "show_name", True):
@@ -1679,13 +1715,15 @@ class DiagramApp:
     def _color_to_hex(cls, color: str) -> str:
         if not color:
             return "#666666"
-        lookup = cls.COLOR_NAME_TO_HEX.get(color.upper())
-        return lookup if lookup else color
+        upper = color.upper()
+        if upper in cls.COLOR_NAME_TO_HEX:
+            return cls.COLOR_NAME_TO_HEX[upper]
+        return color
 
     @classmethod
     def _color_to_name(cls, color: str) -> str:
-        if not color:
-            return "GRAY"
+        if not color or color == "":
+            return "NONE"
         return cls.COLOR_HEX_TO_NAME.get(color.lower(), color)
 
     def _raise_connection(self, connection: Connection):
@@ -2965,28 +3003,38 @@ class DiagramApp:
     def _open_label_dialog(self, connection: Connection, is_new: bool = False):
         dialog = tk.Toplevel(self.root)
         dialog.title("LABEL")
+        dialog.configure(bg=self._DLG_BG)
         dialog.resizable(False, False)
         dialog.grab_set()
 
-        tk.Label(dialog, text="Text:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(dialog, text="Text:", bg=self._DLG_BG, fg=self._DLG_FG).grid(
+            row=0, column=0, sticky="w", padx=5, pady=5)
         text_var = tk.StringVar(value=connection.label or "")
-        text_entry = tk.Entry(dialog, textvariable=text_var, width=30)
+        text_entry = tk.Entry(dialog, textvariable=text_var, width=30,
+                              bg=self._DLG_ENTRY_BG, fg=self._DLG_ENTRY_FG,
+                              insertbackground=self._DLG_FG)
         text_entry.grid(row=0, column=1, columnspan=2, padx=5, pady=5)
         text_entry.focus_set()
 
-        tk.Label(dialog, text="Font:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(dialog, text="Font:", bg=self._DLG_BG, fg=self._DLG_FG).grid(
+            row=1, column=0, sticky="w", padx=5, pady=5)
         font_families = ["Arial", "Helvetica", "Times New Roman", "Courier New", "Verdana", "Georgia"]
         font_var = tk.StringVar(value=connection.label_font_family)
         font_combo = ttk.Combobox(dialog, textvariable=font_var, values=font_families, width=18)
         font_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5)
 
-        tk.Label(dialog, text="Size:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(dialog, text="Size:", bg=self._DLG_BG, fg=self._DLG_FG).grid(
+            row=2, column=0, sticky="w", padx=5, pady=5)
         size_var = tk.IntVar(value=connection.label_font_size)
-        size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5)
+        size_spin = tk.Spinbox(dialog, from_=6, to=72, textvariable=size_var, width=5,
+                               bg=self._DLG_ENTRY_BG, fg=self._DLG_ENTRY_FG)
         size_spin.grid(row=2, column=1, sticky="w", padx=5, pady=5)
 
         bold_var = tk.BooleanVar(value=connection.label_font_weight == "bold")
-        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var)
+        bold_check = tk.Checkbutton(dialog, text="Bold", variable=bold_var,
+                                    bg=self._DLG_BG, fg=self._DLG_FG,
+                                    selectcolor=self._DLG_BTN_BG,
+                                    activebackground=self._DLG_BG)
         bold_check.grid(row=3, column=1, sticky="w", padx=5, pady=5)
 
         result = {"ok": False}
@@ -3000,10 +3048,16 @@ class DiagramApp:
 
         text_entry.bind("<Return>", on_ok)
         dialog.bind("<Escape>", on_cancel)
-        btn_frame = tk.Frame(dialog)
+        btn_frame = tk.Frame(dialog, bg=self._DLG_BG)
         btn_frame.grid(row=4, column=0, columnspan=3, pady=10)
-        tk.Button(btn_frame, text="OK", width=8, command=on_ok).pack(side=tk.LEFT, padx=5)
-        tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="OK", width=8, command=on_ok,
+                  bg=self._DLG_ACCENT, fg="white",
+                  activebackground="#3a8aee", activeforeground="white",
+                  relief="flat", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Cancel", width=8, command=on_cancel,
+                  bg=self._DLG_BTN_BG, fg=self._DLG_FG,
+                  activebackground="#555555", activeforeground="white",
+                  relief="flat").pack(side=tk.LEFT, padx=5)
 
         dialog.wait_window()
         if not result["ok"]:
@@ -3320,23 +3374,70 @@ class DiagramApp:
             return
         self._open_block_dialog(mode="edit", node=node)
 
+    _DLG_BG = "#2b2b2b"
+    _DLG_FG = "#e0e0e0"
+    _DLG_BTN_BG = "#3c3f41"
+    _DLG_BTN_FG = "#e0e0e0"
+    _DLG_ENTRY_BG = "#3c3f41"
+    _DLG_ENTRY_FG = "#e0e0e0"
+    _DLG_ACCENT = "#4a9eff"
+
+    def _style_widget(self, w, is_button=False):
+        """Apply dark theme to a widget recursively."""
+        try:
+            if isinstance(w, (tk.Label,)):
+                w.configure(bg=self._DLG_BG, fg=self._DLG_FG)
+            elif isinstance(w, tk.Checkbutton):
+                w.configure(bg=self._DLG_BG, fg=self._DLG_FG,
+                            selectcolor=self._DLG_BTN_BG,
+                            activebackground=self._DLG_BG,
+                            activeforeground=self._DLG_FG)
+            elif isinstance(w, tk.Radiobutton):
+                w.configure(bg=self._DLG_BG, fg=self._DLG_FG,
+                            selectcolor=self._DLG_BTN_BG,
+                            activebackground=self._DLG_BG,
+                            activeforeground=self._DLG_FG)
+            elif isinstance(w, tk.Frame):
+                w.configure(bg=self._DLG_BG)
+            elif isinstance(w, (tk.Text, tk.Entry, tk.Spinbox)):
+                w.configure(bg=self._DLG_ENTRY_BG, fg=self._DLG_ENTRY_FG,
+                            insertbackground=self._DLG_FG)
+            elif isinstance(w, tk.Menubutton):
+                w.configure(bg=self._DLG_BTN_BG, fg=self._DLG_BTN_FG,
+                            activebackground=self._DLG_ACCENT,
+                            activeforeground="white",
+                            highlightbackground=self._DLG_BG)
+        except tk.TclError:
+            pass
+        for child in w.winfo_children():
+            self._style_widget(child)
+
     def _open_block_dialog(self, mode: str, node: Node | None = None):
         window = tk.Toplevel(self.root)
         window.title("Edit" if mode == "edit" else "New")
+        window.configure(bg=self._DLG_BG)
         window.bind("<Escape>", lambda _e: window.destroy())
         mode_var = tk.StringVar(value="block")
         if mode == "create":
-            tk.Radiobutton(window, text="Block", variable=mode_var, value="block").grid(
+            tk.Radiobutton(window, text="Block", variable=mode_var, value="block",
+                           bg=self._DLG_BG, fg=self._DLG_FG,
+                           selectcolor=self._DLG_BTN_BG,
+                           activebackground=self._DLG_BG,
+                           activeforeground=self._DLG_FG).grid(
                 row=0, column=0, padx=6, pady=6, sticky="w"
             )
-            tk.Radiobutton(window, text="Diagram", variable=mode_var, value="gate").grid(
+            tk.Radiobutton(window, text="Diagram", variable=mode_var, value="gate",
+                           bg=self._DLG_BG, fg=self._DLG_FG,
+                           selectcolor=self._DLG_BTN_BG,
+                           activebackground=self._DLG_BG,
+                           activeforeground=self._DLG_FG).grid(
                 row=0, column=1, padx=6, pady=6, sticky="w"
             )
 
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
         color_hex_map = self.COLOR_NAME_TO_HEX
 
-        def _make_color_bar(parent, var, row):
+        def _make_color_bar(parent, var, row, show_none=False):
             """Create a row of color swatch buttons that update *var* on click."""
             bar = tk.Frame(parent)
             bar.grid(row=row, column=1, padx=6, pady=3, sticky="w")
@@ -3346,12 +3447,21 @@ class DiagramApp:
                 for n, b in btns.items():
                     b.configure(relief="sunken" if n == name else "raised",
                                 bd=2 if n == name else 1)
-            for cname in color_options:
+            items = color_options if show_none else [c for c in color_options if c != "NONE"]
+            for cname in items:
                 hex_val = color_hex_map[cname]
-                b = tk.Button(bar, width=2, height=1, bg=hex_val,
-                              activebackground=hex_val,
-                              relief="raised", bd=1,
-                              command=lambda n=cname: _select(n))
+                if cname == "NONE":
+                    b = tk.Button(bar, text="X", width=2, height=1,
+                                  bg="#f0f0f0", fg="red",
+                                  activebackground="#f0f0f0",
+                                  font=("Arial", 8, "bold"),
+                                  relief="raised", bd=1,
+                                  command=lambda n=cname: _select(n))
+                else:
+                    b = tk.Button(bar, width=2, height=1, bg=hex_val,
+                                  activebackground=hex_val,
+                                  relief="raised", bd=1,
+                                  command=lambda n=cname: _select(n))
                 b.pack(side="left", padx=1)
                 btns[cname] = b
             # Sync initial selection
@@ -3396,7 +3506,7 @@ class DiagramApp:
             r += 1
             tk.Label(frame, text="Fill Color").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["fill_var"] = tk.StringVar(value="WHITE")
-            _make_color_bar(frame, fields["fill_var"], r)
+            _make_color_bar(frame, fields["fill_var"], r, show_none=True)
             r += 1
             tk.Label(frame, text="Outline").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["outline_enabled_var"] = tk.BooleanVar(value=True)
@@ -3413,6 +3523,12 @@ class DiagramApp:
                 frame, fields["outline_thickness_var"], "Thin", "Normal", "Thick")
             fields["outline_thickness_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
+            tk.Label(frame, text="Outline Style").grid(row=r, column=0, padx=6, pady=3, sticky="w")
+            fields["outline_style_var"] = tk.StringVar(value="Solid")
+            fields["outline_style_menu"] = tk.OptionMenu(
+                frame, fields["outline_style_var"], "Solid", "Dashed")
+            fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
+            r += 1
             tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["h_align_var"] = tk.StringVar(value=default_h_align)
             tk.OptionMenu(frame, fields["h_align_var"], "Left", "Center", "Right").grid(
@@ -3428,17 +3544,18 @@ class DiagramApp:
                 for child in fields["outline_color_bar"].winfo_children():
                     child.configure(state=st)
                 fields["outline_thickness_menu"].configure(state=st)
+                fields["outline_style_menu"].configure(state=st)
             fields["outline_enabled_var"].trace_add("write", _toggle_outline)
             _toggle_outline()
             return fields
 
         # --- Block frame ---
-        block_frame = tk.Frame(window)
+        block_frame = tk.Frame(window, bg=self._DLG_BG)
         block_frame.grid(row=1, column=0, columnspan=2, sticky="w")
         bf = _build_style_fields(block_frame, 0)
 
         # --- Diagram (gate) frame ---
-        gate_frame = tk.Frame(window)
+        gate_frame = tk.Frame(window, bg=self._DLG_BG)
         gate_frame.grid(row=1, column=0, columnspan=2, sticky="w")
 
         tk.Label(gate_frame, text="Diagram Type").grid(row=0, column=0, padx=6, pady=6, sticky="w")
@@ -3449,6 +3566,10 @@ class DiagramApp:
         gf = _build_style_fields(gate_frame, 1, name_height=2,
                                  default_h_align="Center", default_v_align="Center",
                                  default_show_name=False)
+
+        # Apply dark theme to all dialog widgets
+        self._style_widget(block_frame)
+        self._style_widget(gate_frame)
 
         # Shorthand references for block frame (used by edit mode and block create)
         name_entry = bf["name_entry"]
@@ -3509,6 +3630,7 @@ class DiagramApp:
             fields_dict["outline_enabled_var"].set(src_node.outline_enabled)
             thickness_map = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
             fields_dict["outline_thickness_var"].set(thickness_map.get(src_node.outline_scale, "Normal"))
+            fields_dict["outline_style_var"].set(getattr(src_node, "outline_style", "solid").capitalize())
             fields_dict["h_align_var"].set(getattr(src_node, "label_h_align", "left").capitalize())
             fields_dict["v_align_var"].set(getattr(src_node, "label_v_align", "top").capitalize())
 
@@ -3531,6 +3653,7 @@ class DiagramApp:
             thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
             target.outline_scale = thickness_map.get(outline_thickness_var.get(), 1.0)
             target.outline_enabled = outline_enabled_var.get()
+            target.outline_style = bf["outline_style_var"].get().lower()
             target.label_h_align = h_align_var.get().lower()
             target.label_v_align = v_align_var.get().lower()
             self._redraw_node(target)
@@ -3546,6 +3669,7 @@ class DiagramApp:
             thickness_map = {"Thin": 0.5, "Normal": 1.0, "Thick": 2.0}
             target.outline_scale = thickness_map.get(gf["outline_thickness_var"].get(), 1.0)
             target.outline_enabled = gf["outline_enabled_var"].get()
+            target.outline_style = gf["outline_style_var"].get().lower()
             target.label_h_align = gf["h_align_var"].get().lower()
             target.label_v_align = gf["v_align_var"].get().lower()
 
@@ -3663,7 +3787,12 @@ class DiagramApp:
                 self._record_history()
                 window.destroy()
 
-        tk.Button(window, text="Create", command=_create_or_edit).grid(row=2, column=0, columnspan=3, pady=8)
+        btn_text = "Apply" if mode == "edit" else "Create"
+        tk.Button(window, text=btn_text, command=_create_or_edit,
+                  bg=self._DLG_ACCENT, fg="white",
+                  activebackground="#3a8aee", activeforeground="white",
+                  relief="flat", padx=16, pady=4,
+                  font=("Arial", 10, "bold")).grid(row=2, column=0, columnspan=3, pady=12)
 
     def _rename_node(self, old_name: str, new_name: str):
         node = self.nodes.pop(old_name)
@@ -3744,16 +3873,18 @@ class DiagramApp:
     ) -> tuple[str, float] | None:
         dialog = tk.Toplevel(self.root)
         dialog.title(title)
+        dialog.configure(bg=self._DLG_BG)
         dialog.resizable(False, False)
         dialog.grab_set()
 
-        color_options = list(self.COLOR_NAME_TO_HEX.keys())
-        tk.Label(dialog, text="Color").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        wire_color_opts = [c for c in self.COLOR_NAME_TO_HEX.keys() if c != "NONE"]
+        tk.Label(dialog, text="Color", bg=self._DLG_BG, fg=self._DLG_FG).grid(
+            row=0, column=0, padx=6, pady=6, sticky="w")
         color_name = self._color_to_name(initial_color)
-        if color_name not in color_options:
+        if color_name not in wire_color_opts:
             color_name = "BLACK"
         color_var = tk.StringVar(value=color_name)
-        color_bar = tk.Frame(dialog)
+        color_bar = tk.Frame(dialog, bg=self._DLG_BG)
         color_bar.grid(row=0, column=1, padx=6, pady=3, sticky="w")
         _wire_btns = {}
         def _wire_sel(name):
@@ -3761,7 +3892,7 @@ class DiagramApp:
             for n, b in _wire_btns.items():
                 b.configure(relief="sunken" if n == name else "raised",
                             bd=2 if n == name else 1)
-        for cname in color_options:
+        for cname in wire_color_opts:
             hex_val = self.COLOR_NAME_TO_HEX[cname]
             b = tk.Button(color_bar, width=2, height=1, bg=hex_val,
                           activebackground=hex_val, relief="raised", bd=1,
@@ -3770,10 +3901,14 @@ class DiagramApp:
             _wire_btns[cname] = b
         _wire_sel(color_name)
 
-        tk.Label(dialog, text="Thickness").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        tk.Label(dialog, text="Thickness", bg=self._DLG_BG, fg=self._DLG_FG).grid(
+            row=1, column=0, padx=6, pady=6, sticky="w")
         thickness_lookup = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
         thickness_var = tk.StringVar(value=thickness_lookup.get(initial_thickness, "Normal"))
         thickness_menu = tk.OptionMenu(dialog, thickness_var, "Thin", "Normal", "Thick")
+        thickness_menu.configure(bg=self._DLG_BTN_BG, fg=self._DLG_BTN_FG,
+                                 activebackground=self._DLG_ACCENT,
+                                 highlightbackground=self._DLG_BG)
         thickness_menu.grid(row=1, column=1, padx=6, pady=6, sticky="w")
 
         result = {"ok": False}
@@ -3787,8 +3922,14 @@ class DiagramApp:
 
         dialog.bind("<Escape>", on_cancel)
         dialog.bind("<Return>", on_ok)
-        tk.Button(dialog, text="OK", width=8, command=on_ok).grid(row=2, column=0, padx=6, pady=8)
-        tk.Button(dialog, text="Cancel", width=8, command=on_cancel).grid(row=2, column=1, padx=6, pady=8)
+        tk.Button(dialog, text="OK", width=8, command=on_ok,
+                  bg=self._DLG_ACCENT, fg="white",
+                  activebackground="#3a8aee", activeforeground="white",
+                  relief="flat", font=("Arial", 9, "bold")).grid(row=2, column=0, padx=6, pady=8)
+        tk.Button(dialog, text="Cancel", width=8, command=on_cancel,
+                  bg=self._DLG_BTN_BG, fg=self._DLG_FG,
+                  activebackground="#555555", activeforeground="white",
+                  relief="flat").grid(row=2, column=1, padx=6, pady=8)
 
         dialog.wait_window()
         if not result["ok"]:
