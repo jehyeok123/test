@@ -587,19 +587,22 @@ class DiagramApp:
             cx, cy = sw / 2, sh / 2
             # Cloud shape: overlapping circles traced from center
             m = lw
-            cloud_circles = [
+            # Top half bumps (mirrored to bottom for symmetry)
+            top_bumps = [
                 (0.50, 0.25, 0.26),   # top center bump
                 (0.30, 0.30, 0.22),   # top-left bump
                 (0.70, 0.30, 0.22),   # top-right bump
+            ]
+            cloud_circles = [
                 (0.15, 0.48, 0.22),   # left bump (widest zone)
                 (0.85, 0.48, 0.22),   # right bump (widest zone)
                 (0.38, 0.48, 0.24),   # center-left fill
                 (0.62, 0.48, 0.24),   # center-right fill
                 (0.50, 0.50, 0.25),   # center core
-                (0.25, 0.65, 0.20),   # bottom-left bump
-                (0.75, 0.65, 0.20),   # bottom-right bump
-                (0.50, 0.68, 0.20),   # bottom center bump
             ]
+            for (bx, by, br) in top_bumps:
+                cloud_circles.append((bx, by, br))
+                cloud_circles.append((bx, 1.0 - by, br))  # mirror to bottom
             # Convert fractional positions to pixel coords
             circles_px = []
             for (cxf, cyf, rf) in cloud_circles:
@@ -911,7 +914,7 @@ class DiagramApp:
                 self._resize_data["mode"] = resize_mode
                 self._resize_data["x"] = cx
                 self._resize_data["y"] = cy
-                if node.kind == "BLOCK" or node.kind in self._CUSTOM_GATE_KINDS:
+                if node.kind == "BLOCK" or node.kind in self._CUSTOM_GATE_KINDS or node.kind in self._DIAGRAM_SHAPES:
                     self._resize_data["orig"] = (node.x, node.y, node.width, node.height)
                 else:
                     self._resize_data["orig"] = (
@@ -1427,7 +1430,7 @@ class DiagramApp:
         if not node or not mode or not orig:
             return
         cx, cy = self._cx(event), self._cy(event)
-        if node.kind != "BLOCK" and node.kind not in self._CUSTOM_GATE_KINDS:
+        if node.kind != "BLOCK" and node.kind not in self._CUSTOM_GATE_KINDS and node.kind not in self._DIAGRAM_SHAPES:
             self._resize_gate(node, mode, orig, cx, cy)
             return
         orig_x, orig_y, orig_width, orig_height = orig
@@ -1529,16 +1532,16 @@ class DiagramApp:
         self._draw_alignment_guides(node)
 
     def _reposition_gate_ports(self, node: Node):
-        n_in = len(node.inputs)
-        for idx, port in enumerate(node.inputs):
-            port.offset = (idx + 1) / (n_in + 1)
-            if port.side in ("left", "right"):
-                port.manual_y = node.y + port.offset * node.height
-        n_out = len(node.outputs)
-        for idx, port in enumerate(node.outputs):
-            port.offset = (idx + 1) / (n_out + 1)
-            if port.side in ("left", "right"):
-                port.manual_y = node.y + port.offset * node.height
+        # Group ports by side for proper offset calculation
+        by_side: dict[str, list[Port]] = {}
+        for port in node.inputs + node.outputs:
+            by_side.setdefault(port.side, []).append(port)
+        for side, ports in by_side.items():
+            n = len(ports)
+            for idx, port in enumerate(ports):
+                port.offset = (idx + 1) / (n + 1)
+                if side in ("left", "right"):
+                    port.manual_y = node.y + port.offset * node.height
 
     def _resize_gate(self, node: Node, mode: str, orig: tuple, cx: float, cy: float):
         base_image = self._gate_base_image(node.kind)
@@ -3330,77 +3333,101 @@ class DiagramApp:
             )
 
         color_options = list(self.COLOR_NAME_TO_HEX.keys())
+        color_hex_map = self.COLOR_NAME_TO_HEX
+
+        def _make_color_bar(parent, var, row):
+            """Create a row of color swatch buttons that update *var* on click."""
+            bar = tk.Frame(parent)
+            bar.grid(row=row, column=1, padx=6, pady=3, sticky="w")
+            btns = {}
+            def _select(name):
+                var.set(name)
+                for n, b in btns.items():
+                    b.configure(relief="sunken" if n == name else "raised",
+                                bd=2 if n == name else 1)
+            for cname in color_options:
+                hex_val = color_hex_map[cname]
+                b = tk.Button(bar, width=2, height=1, bg=hex_val,
+                              activebackground=hex_val,
+                              relief="raised", bd=1,
+                              command=lambda n=cname: _select(n))
+                b.pack(side="left", padx=1)
+                btns[cname] = b
+            # Sync initial selection
+            def _sync(*_a):
+                cur = var.get()
+                for n, b in btns.items():
+                    b.configure(relief="sunken" if n == cur else "raised",
+                                bd=2 if n == cur else 1)
+            var.trace_add("write", _sync)
+            _sync()
+            return bar
 
         # --- Helper to build common UI fields on a frame starting at given row ---
         def _build_style_fields(frame, start_row, name_height=5,
-                                default_h_align="Left", default_v_align="Top",
-                                disable_outline_style=False):
+                                default_h_align="Left", default_v_align="Top"):
             fields = {}
             r = start_row
             tk.Label(frame, text="Name").grid(row=r, column=0, padx=6, pady=6, sticky="nw")
             fields["name_entry"] = tk.Text(frame, height=name_height, width=24)
             fields["name_entry"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
             r += 1
-            tk.Label(frame, text="Font Size").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Font Size").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["font_size_var"] = tk.IntVar(value=12)
             tk.Spinbox(frame, from_=6, to=72, textvariable=fields["font_size_var"], width=6).grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+                row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Font").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Font").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["font_family_var"] = tk.StringVar(value="Arial")
             tk.OptionMenu(frame, fields["font_family_var"], "Arial", "Malgun Gothic").grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+                row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Bold").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Bold").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["bold_var"] = tk.BooleanVar(value=True)
             tk.Checkbutton(frame, variable=fields["bold_var"]).grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+                row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Fill Color").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Fill Color").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["fill_var"] = tk.StringVar(value="WHITE")
-            tk.OptionMenu(frame, fields["fill_var"], *color_options).grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+            _make_color_bar(frame, fields["fill_var"], r)
             r += 1
-            tk.Label(frame, text="Outline").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Outline").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["outline_enabled_var"] = tk.BooleanVar(value=True)
             tk.Checkbutton(frame, variable=fields["outline_enabled_var"]).grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+                row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Outline Color").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Outline Color").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["outline_var"] = tk.StringVar(value="BLACK")
-            fields["outline_menu"] = tk.OptionMenu(frame, fields["outline_var"], *color_options)
-            fields["outline_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            fields["outline_color_bar"] = _make_color_bar(frame, fields["outline_var"], r)
             r += 1
-            tk.Label(frame, text="Outline Thickness").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Outline Thickness").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["outline_thickness_var"] = tk.StringVar(value="Normal")
             fields["outline_thickness_menu"] = tk.OptionMenu(
                 frame, fields["outline_thickness_var"], "Thin", "Normal", "Thick")
-            fields["outline_thickness_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
+            fields["outline_thickness_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Outline Style").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Outline Style").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["outline_style_var"] = tk.StringVar(value="Solid")
             fields["outline_style_menu"] = tk.OptionMenu(
                 frame, fields["outline_style_var"], "Solid", "Dashed")
-            fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=6, sticky="w")
-            if disable_outline_style:
-                fields["outline_style_menu"].configure(state="disabled")
+            fields["outline_style_menu"].grid(row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Name H-Align").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["h_align_var"] = tk.StringVar(value=default_h_align)
             tk.OptionMenu(frame, fields["h_align_var"], "Left", "Center", "Right").grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
+                row=r, column=1, padx=6, pady=3, sticky="w")
             r += 1
-            tk.Label(frame, text="Name V-Align").grid(row=r, column=0, padx=6, pady=6, sticky="w")
+            tk.Label(frame, text="Name V-Align").grid(row=r, column=0, padx=6, pady=3, sticky="w")
             fields["v_align_var"] = tk.StringVar(value=default_v_align)
             tk.OptionMenu(frame, fields["v_align_var"], "Top", "Center", "Bottom").grid(
-                row=r, column=1, padx=6, pady=6, sticky="w")
-            # Wire outline toggle
+                row=r, column=1, padx=6, pady=3, sticky="w")
+            # Outline toggle
             def _toggle_outline(*_a):
                 st = "normal" if fields["outline_enabled_var"].get() else "disabled"
-                fields["outline_menu"].configure(state=st)
+                for child in fields["outline_color_bar"].winfo_children():
+                    child.configure(state=st)
                 fields["outline_thickness_menu"].configure(state=st)
-                if not disable_outline_style:
-                    fields["outline_style_menu"].configure(state=st)
+                fields["outline_style_menu"].configure(state=st)
             fields["outline_enabled_var"].trace_add("write", _toggle_outline)
             _toggle_outline()
             return fields
@@ -3420,8 +3447,7 @@ class DiagramApp:
         gate_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
         # Build same style fields for diagram frame, starting at row 1
         gf = _build_style_fields(gate_frame, 1, name_height=2,
-                                 default_h_align="Center", default_v_align="Center",
-                                 disable_outline_style=True)
+                                 default_h_align="Center", default_v_align="Center")
 
         # Shorthand references for block frame (used by edit mode and block create)
         name_entry = bf["name_entry"]
@@ -3726,8 +3752,22 @@ class DiagramApp:
         if color_name not in color_options:
             color_name = "BLACK"
         color_var = tk.StringVar(value=color_name)
-        color_menu = tk.OptionMenu(dialog, color_var, *color_options)
-        color_menu.grid(row=0, column=1, padx=6, pady=6, sticky="w")
+        color_bar = tk.Frame(dialog)
+        color_bar.grid(row=0, column=1, padx=6, pady=3, sticky="w")
+        _wire_btns = {}
+        def _wire_sel(name):
+            color_var.set(name)
+            for n, b in _wire_btns.items():
+                b.configure(relief="sunken" if n == name else "raised",
+                            bd=2 if n == name else 1)
+        for cname in color_options:
+            hex_val = self.COLOR_NAME_TO_HEX[cname]
+            b = tk.Button(color_bar, width=2, height=1, bg=hex_val,
+                          activebackground=hex_val, relief="raised", bd=1,
+                          command=lambda n=cname: _wire_sel(n))
+            b.pack(side="left", padx=1)
+            _wire_btns[cname] = b
+        _wire_sel(color_name)
 
         tk.Label(dialog, text="Thickness").grid(row=1, column=0, padx=6, pady=6, sticky="w")
         thickness_lookup = {0.5: "Thin", 1.0: "Normal", 2.0: "Thick"}
