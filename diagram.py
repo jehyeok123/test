@@ -155,6 +155,8 @@ class DiagramApp:
         self.save_button.pack(side=tk.LEFT, padx=2)
         self.save_png_button = ttk.Button(self.toolbar_row1, text="SAVE PNG (Ctrl+P)", command=self._save_png, style="Tool.TButton")
         self.save_png_button.pack(side=tk.LEFT, padx=2)
+        self.save_pptx_button = ttk.Button(self.toolbar_row1, text="SAVE PPTX (Ctrl+Shift+P)", command=self._save_pptx, style="Tool.TButton")
+        self.save_pptx_button.pack(side=tk.LEFT, padx=2)
         self.connect_button = ttk.Button(self.toolbar_row1, text="CONNECT (W)", command=self._toggle_connect_mode, style="Tool.TButton")
         self.connect_button.pack(side=tk.LEFT, padx=2)
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
@@ -342,6 +344,7 @@ class DiagramApp:
         self.root.bind("<Control-c>", lambda _event: self._copy_selection())
         self.root.bind("<Control-v>", lambda _event: self._paste_selection())
         self.root.bind("<Control-p>", lambda _event: self._save_png())
+        self.root.bind("<Control-Shift-P>", lambda _event: self._save_pptx())
         self.root.bind("<Tab>", lambda _event: self._toggle_wire_arrow())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
         self._record_history(initial=True)
@@ -5132,6 +5135,7 @@ class DiagramApp:
             "- ROTATE (R): rotate the selected block/gate/label 90° clockwise.\n"
             "- DELETE (Del): toggle delete mode (items blink red, click to remove, Del to exit).\n"
             "- SAVE (Ctrl+S): save to input.json.\n"
+            "- SAVE PPTX (Ctrl+Shift+P): export to PowerPoint (.pptx).\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
             "- DISCONNECT: click a wire to remove it.\n"
             "- LABEL (L): click a wire to add/edit a label.\n"
@@ -5177,6 +5181,290 @@ class DiagramApp:
         )
         if path:
             self.save_diagram(Path(path))
+
+    def _save_pptx(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".pptx",
+            filetypes=[("PowerPoint files", "*.pptx"), ("All files", "*.*")],
+            title="Save PPTX",
+        )
+        if path:
+            self._export_pptx(Path(path))
+
+    def _export_pptx(self, path: Path):
+        """Export the current diagram to a PowerPoint (.pptx) file."""
+        try:
+            from pptx import Presentation
+            from pptx.util import Pt, Emu
+            from pptx.enum.shapes import MSO_SHAPE
+            from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+            from pptx.dml.color import RGBColor
+        except ImportError:
+            messagebox.showerror("Error", "python-pptx is not installed.\nRun: pip install python-pptx")
+            return
+
+        # --- helpers ---
+        def _hex_to_rgb(hex_color: str) -> RGBColor | None:
+            """Convert a hex color string to RGBColor, returns None for empty/transparent."""
+            if not hex_color or hex_color == "":
+                return None
+            try:
+                r, g, b = self.canvas.winfo_rgb(hex_color)
+                return RGBColor(r >> 8, g >> 8, b >> 8)
+            except Exception:
+                pass
+            h = hex_color.lstrip("#")
+            if len(h) == 6:
+                return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+            return RGBColor(0, 0, 0)
+
+        # Determine slide dimensions from content bounding box
+        bbox = self._content_bbox()
+        if not bbox:
+            messagebox.showinfo("Info", "Nothing to export.")
+            return
+        margin = 40
+        ox, oy = bbox[0] - margin, bbox[1] - margin
+        slide_w = bbox[2] - bbox[0] + 2 * margin
+        slide_h = bbox[3] - bbox[1] + 2 * margin
+
+        prs = Presentation()
+        prs.slide_width = Emu(int(slide_w * 914400 / 96))  # px -> EMU at 96dpi
+        prs.slide_height = Emu(int(slide_h * 914400 / 96))
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+
+        px2emu = 914400 / 96  # conversion factor
+
+        def _emu(px):
+            return Emu(int(px * px2emu))
+
+        # Shape kind mapping
+        shape_map = {
+            "CIRCLE": MSO_SHAPE.OVAL,
+            "RECTANGLE": MSO_SHAPE.RECTANGLE,
+            "ROUNDED_RECT": MSO_SHAPE.ROUNDED_RECTANGLE,
+            "CLOUD": MSO_SHAPE.CLOUD,
+        }
+
+        # Collect junction node names
+        junction_names: set[str] = set()
+        for conn in self.connections:
+            for jp in conn.junction_ports:
+                n = jp.get("node")
+                if n:
+                    junction_names.add(n)
+
+        # --- Draw nodes ---
+        sorted_nodes = sorted(self.nodes.values(), key=lambda n: n.level)
+        for node in sorted_nodes:
+            if node.name in junction_names:
+                continue
+            if node.kind == "PORT":
+                continue
+
+            left = node.x - ox
+            top = node.y - oy
+            width = node.width
+            height = node.height
+
+            fill_rgb = _hex_to_rgb(node.fill_color)
+            outline_rgb = _hex_to_rgb(node.outline_color)
+            outline_w = max(0.5, 1.0 * node.outline_scale)
+            is_dashed = getattr(node, "outline_style", "solid") == "dashed"
+
+            # Determine shape type
+            if node.kind == "BLOCK":
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind in shape_map:
+                shape = slide.shapes.add_shape(
+                    shape_map[node.kind],
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind.startswith("MUX"):
+                # Trapezoid shape for MUX
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.FLOWCHART_MANUAL_OPERATION,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind.startswith("DEMUX"):
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.FLOWCHART_MANUAL_OPERATION,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind.startswith("AND"):
+                # D-shape (stadium/rounded right side)
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.FLOWCHART_DELAY,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind.startswith("OR") or node.kind.startswith("XOR"):
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.FLOWCHART_EXTRACT,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind == "DFF":
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            elif node.kind == "INV":
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.ISOSCELES_TRIANGLE,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+            else:
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    _emu(left), _emu(top), _emu(width), _emu(height),
+                )
+
+            # Apply fill
+            sf = shape.fill
+            if fill_rgb is None:
+                sf.background()  # no fill / transparent
+            else:
+                sf.solid()
+                sf.fore_color.rgb = fill_rgb
+
+            # Apply outline
+            ln = shape.line
+            if node.outline_enabled and outline_rgb:
+                ln.color.rgb = outline_rgb
+                ln.width = Pt(outline_w)
+                if is_dashed:
+                    from pptx.oxml.ns import qn
+                    ln_elem = ln._ln
+                    prstDash = ln_elem.find(qn('a:prstDash'))
+                    if prstDash is None:
+                        from lxml import etree
+                        prstDash = etree.SubElement(ln_elem, qn('a:prstDash'))
+                    prstDash.set('val', 'dash')
+            else:
+                ln.fill.background()  # no outline
+
+            # Apply rotation
+            if node.rotation:
+                shape.rotation = node.rotation
+
+            # Add text label
+            show_name = getattr(node, "show_name", True)
+            if show_name and node.name:
+                tf = shape.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                p.text = node.name
+                run = p.runs[0] if p.runs else p.add_run()
+                run.text = node.name
+                run.font.size = Pt(node.label_font_size)
+                run.font.name = node.label_font_family
+                run.font.bold = node.label_font_weight == "bold"
+                run.font.color.rgb = RGBColor(0, 0, 0)
+
+                # Text alignment
+                h_align = getattr(node, "label_h_align", "left")
+                if h_align == "center":
+                    p.alignment = PP_ALIGN.CENTER
+                elif h_align == "right":
+                    p.alignment = PP_ALIGN.RIGHT
+                else:
+                    p.alignment = PP_ALIGN.LEFT
+
+                v_align = getattr(node, "label_v_align", "top")
+                if v_align == "center":
+                    tf.paragraphs[0]  # vertical centering
+                    shape.text_frame.auto_size = None
+                    from pptx.oxml.ns import qn as _qn
+                    body = shape._element.find(_qn('p:txBody'))
+                    if body is not None:
+                        bodyPr = body.find(_qn('a:bodyPr'))
+                        if bodyPr is not None:
+                            bodyPr.set('anchor', 'ctr')
+                elif v_align == "bottom":
+                    from pptx.oxml.ns import qn as _qn
+                    body = shape._element.find(_qn('p:txBody'))
+                    if body is not None:
+                        bodyPr = body.find(_qn('a:bodyPr'))
+                        if bodyPr is not None:
+                            bodyPr.set('anchor', 'b')
+
+        # --- Draw connections (wires) as freeform lines ---
+        for connection in self.connections:
+            coords = self._connection_line_coords(connection)
+            if not coords or len(coords) < 4:
+                # Handle floating labels
+                if connection.label and connection.label_x is not None:
+                    lx = (connection.label_x or 200) - ox
+                    ly = (connection.label_y or 200) - oy
+                    txbox = slide.shapes.add_textbox(
+                        _emu(lx - 50), _emu(ly - 10), _emu(100), _emu(20),
+                    )
+                    tf = txbox.text_frame
+                    p = tf.paragraphs[0]
+                    p.text = connection.label
+                    p.alignment = PP_ALIGN.CENTER
+                    run = p.runs[0] if p.runs else p.add_run()
+                    run.text = connection.label
+                    run.font.size = Pt(connection.label_font_size)
+                    run.font.name = connection.label_font_family
+                    run.font.bold = connection.label_font_weight == "bold"
+                continue
+
+            # Convert coords to point pairs
+            points = [(coords[i] - ox, coords[i + 1] - oy) for i in range(0, len(coords), 2)]
+
+            line_rgb = _hex_to_rgb(connection.line_color) or RGBColor(0x33, 0x33, 0x33)
+            line_w = max(0.5, connection.line_thickness)
+
+            if len(points) == 2:
+                # Simple line (connector)
+                connector = slide.shapes.add_connector(
+                    1,  # MSO_CONNECTOR_TYPE.STRAIGHT
+                    _emu(points[0][0]), _emu(points[0][1]),
+                    _emu(points[1][0]), _emu(points[1][1]),
+                )
+                connector.line.color.rgb = line_rgb
+                connector.line.width = Pt(line_w)
+            else:
+                # Multi-segment polyline using freeform
+                builder = slide.shapes.build_freeform(
+                    _emu(points[0][0]), _emu(points[0][1]),
+                )
+                for px, py in points[1:]:
+                    builder.add_line_segments(
+                        [(_emu(px), _emu(py))],
+                    )
+                freeform = builder.convert_to_shape(_emu(0), _emu(0))
+                freeform.fill.background()
+                freeform.line.color.rgb = line_rgb
+                freeform.line.width = Pt(line_w)
+
+            # Add wire label as textbox
+            if connection.label:
+                if connection.label_x is not None and connection.label_y is not None:
+                    lx, ly = connection.label_x - ox, connection.label_y - oy
+                else:
+                    # Midpoint of first segment
+                    lx = (points[0][0] + points[-1][0]) / 2
+                    ly = (points[0][1] + points[-1][1]) / 2
+                txbox = slide.shapes.add_textbox(
+                    _emu(lx - 40), _emu(ly - 12), _emu(80), _emu(24),
+                )
+                tf = txbox.text_frame
+                p = tf.paragraphs[0]
+                p.text = connection.label
+                p.alignment = PP_ALIGN.CENTER
+                run = p.runs[0] if p.runs else p.add_run()
+                run.text = connection.label
+                run.font.size = Pt(connection.label_font_size)
+                run.font.name = connection.label_font_family
+                run.font.bold = connection.label_font_weight == "bold"
+
+        prs.save(str(path))
+        messagebox.showinfo("Export", f"PPTX saved to:\n{path}")
 
     def _toggle_wire_arrow(self):
         if not self._selected_wire:
