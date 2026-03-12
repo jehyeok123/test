@@ -6047,11 +6047,14 @@ def validate_connections(nodes: dict[str, Node], connections: list[Connection], 
 def main():
     input_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("input.json")
     output_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("diagram.png")
-    if not input_path.exists():
-        print("input.json 파일이 없습니다.")
-        sys.exit(1)
-    nodes, connections = parse_json(input_path)
-    validate_connections(nodes, connections, Path("error.log"))
+    if input_path.exists():
+        nodes, connections = parse_json(input_path)
+        validate_connections(nodes, connections, Path("error.log"))
+    else:
+        # Start with an empty diagram and create the input file
+        nodes, connections = {}, []
+        input_path.write_text(json.dumps({"blocks": [], "connections": [], "wires": []}, indent=2),
+                              encoding="utf-8")
     app = DiagramApp(nodes, connections, input_path, output_path)
     app.run()
 
