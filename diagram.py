@@ -157,6 +157,8 @@ class DiagramApp:
         self.save_png_button.pack(side=tk.LEFT, padx=2)
         self.save_pptx_button = ttk.Button(self.toolbar_row1, text="SAVE PPTX (Ctrl+Shift+P)", command=self._save_pptx, style="Tool.TButton")
         self.save_pptx_button.pack(side=tk.LEFT, padx=2)
+        self.save_svg_button = ttk.Button(self.toolbar_row1, text="SAVE SVG", command=self._save_svg, style="Tool.TButton")
+        self.save_svg_button.pack(side=tk.LEFT, padx=2)
         self.import_button = ttk.Button(self.toolbar_row1, text="IMPORT (Ctrl+I)", command=self._import_file, style="Tool.TButton")
         self.import_button.pack(side=tk.LEFT, padx=2)
         self.connect_button = ttk.Button(self.toolbar_row1, text="CONNECT (W)", command=self._toggle_connect_mode, style="Tool.TButton")
@@ -2843,6 +2845,10 @@ class DiagramApp:
         self._deselect_label()
 
     def _copy_selection(self):
+        # Collect selected elements for both internal and PPTX clipboard
+        copied_nodes = []
+        copied_conns = []
+
         if self._active_node_name:
             node = self.nodes.get(self._active_node_name)
             if node:
@@ -2870,8 +2876,8 @@ class DiagramApp:
                     "rotation": node.rotation,
                     "name": node.name,
                 }
-                return
-        if self._selected_wire:
+                copied_nodes.append(node)
+        elif self._selected_wire:
             conn = self._selected_wire
             self._clipboard = {
                 "type": "wire",
@@ -2885,8 +2891,8 @@ class DiagramApp:
                 "label_font_weight": conn.label_font_weight,
                 "label_angle": conn.label_angle,
             }
-            return
-        if self._selected_label_conn:
+            copied_conns.append(conn)
+        elif self._selected_label_conn:
             conn = self._selected_label_conn
             self._clipboard = {
                 "type": "label",
@@ -2898,7 +2904,52 @@ class DiagramApp:
                 "label_x": conn.label_x,
                 "label_y": conn.label_y,
             }
-            return
+            copied_conns.append(conn)
+
+        # Also export to temp .pptx for external paste (PPT/Visio)
+        if copied_nodes or copied_conns:
+            self._copy_to_pptx_clipboard(copied_nodes, copied_conns)
+
+    def _copy_to_pptx_clipboard(self, nodes_list, conns_list):
+        """Generate a temp .pptx from selected elements and put path on system clipboard."""
+        import tempfile
+        try:
+            tmp_dir = Path(tempfile.gettempdir())
+            tmp_path = tmp_dir / "diagram_clipboard.pptx"
+            self._export_pptx(tmp_path, nodes_list=nodes_list,
+                             connections_list=conns_list, silent=True)
+            if tmp_path.exists():
+                # Put the file path on the system clipboard so user can find it
+                self.root.clipboard_clear()
+                self.root.clipboard_append(str(tmp_path))
+                # On Windows, also try to put the PPTX data directly on clipboard
+                self._try_set_office_clipboard(tmp_path)
+        except Exception:
+            pass
+
+    def _try_set_office_clipboard(self, pptx_path: Path):
+        """Windows: put PPTX data on clipboard as 'PowerPoint 14.0 Slides Package'."""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            data = pptx_path.read_bytes()
+            fmt = user32.RegisterClipboardFormatW("PowerPoint 14.0 Slides Package")
+            if not user32.OpenClipboard(0):
+                return
+            try:
+                handle = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE | GMEM_ZEROINIT
+                if handle:
+                    ptr = kernel32.GlobalLock(handle)
+                    if ptr:
+                        ctypes.memmove(ptr, data, len(data))
+                        kernel32.GlobalUnlock(handle)
+                        user32.SetClipboardData(fmt, handle)
+            finally:
+                user32.CloseClipboard()
+        except Exception:
+            pass  # Not Windows or no ctypes support
 
     def _paste_selection(self):
         if not self._clipboard:
@@ -5142,6 +5193,7 @@ class DiagramApp:
             "- DELETE (Del): toggle delete mode (items blink red, click to remove, Del to exit).\n"
             "- SAVE (Ctrl+S): save to input.json.\n"
             "- SAVE PPTX (Ctrl+Shift+P): export to PowerPoint (.pptx).\n"
+            "- SAVE SVG: export to SVG (Visio에서 File → Open으로 열기 가능).\n"
             "- IMPORT (Ctrl+I): import shapes from PowerPoint (.pptx) or Visio (.vsdx).\n"
             "- Ctrl+V: paste from internal clipboard or Office (PPT/Visio) clipboard.\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
@@ -5190,6 +5242,146 @@ class DiagramApp:
         if path:
             self.save_diagram(Path(path))
 
+    def _save_svg(self):
+        from tkinter import filedialog
+        path = filedialog.asksaveasfilename(
+            defaultextension=".svg",
+            filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
+            title="Save SVG (for Visio)",
+        )
+        if path:
+            self._export_svg(Path(path))
+
+    def _export_svg(self, path: Path, nodes_list=None, connections_list=None, silent=False):
+        """Export diagram to SVG. Visio can import SVG and edit individual shapes."""
+        export_nodes = nodes_list if nodes_list is not None else [
+            n for n in self.nodes.values() if n.kind != "PORT"]
+        export_conns = connections_list if connections_list is not None else list(self.connections)
+
+        # Collect junction names to skip
+        junction_names: set[str] = set()
+        for conn in self.connections:
+            for jp in conn.junction_ports:
+                n = jp.get("node")
+                if n:
+                    junction_names.add(n)
+
+        if not export_nodes and not export_conns:
+            if not silent:
+                messagebox.showinfo("Info", "Nothing to export.")
+            return
+
+        # Bounding box
+        x1_bb, y1_bb = float("inf"), float("inf")
+        x2_bb, y2_bb = float("-inf"), float("-inf")
+        for node in export_nodes:
+            x1_bb = min(x1_bb, node.x)
+            y1_bb = min(y1_bb, node.y)
+            x2_bb = max(x2_bb, node.x + node.width)
+            y2_bb = max(y2_bb, node.y + node.height)
+        for conn in export_conns:
+            coords = self._connection_line_coords(conn)
+            if coords:
+                for i in range(0, len(coords), 2):
+                    x1_bb = min(x1_bb, coords[i])
+                    y1_bb = min(y1_bb, coords[i + 1])
+                    x2_bb = max(x2_bb, coords[i])
+                    y2_bb = max(y2_bb, coords[i + 1])
+            if conn.label_x is not None:
+                x1_bb = min(x1_bb, conn.label_x - 50)
+                x2_bb = max(x2_bb, conn.label_x + 50)
+                y1_bb = min(y1_bb, conn.label_y - 10)
+                y2_bb = max(y2_bb, conn.label_y + 10)
+        if x1_bb == float("inf"):
+            return
+
+        margin = 20
+        ox, oy = x1_bb - margin, y1_bb - margin
+        w = x2_bb - x1_bb + 2 * margin
+        h = y2_bb - y1_bb + 2 * margin
+
+        lines = []
+        lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" '
+                     f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">')
+
+        def _esc(s):
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+        def _fill_attr(color):
+            if not color or color == "":
+                return 'fill="none"'
+            return f'fill="{_esc(color)}"'
+
+        def _stroke_attr(node):
+            if not node.outline_enabled:
+                return 'stroke="none" stroke-width="0"'
+            sw = max(1, int(2 * node.outline_scale))
+            da = ' stroke-dasharray="8,4"' if node.outline_style == "dashed" else ""
+            return f'stroke="{_esc(node.outline_color)}" stroke-width="{sw}"{da}'
+
+        # Nodes
+        sorted_nodes = sorted(export_nodes, key=lambda n: n.level)
+        for node in sorted_nodes:
+            if node.name in junction_names or node.kind == "PORT":
+                continue
+            x = node.x - ox
+            y = node.y - oy
+            nw, nh = node.width, node.height
+            fill = _fill_attr(node.fill_color)
+            stroke = _stroke_attr(node)
+
+            if node.kind == "CIRCLE":
+                cx, cy = x + nw / 2, y + nh / 2
+                rx, ry = nw / 2, nh / 2
+                lines.append(f'  <ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" {fill} {stroke}/>')
+            elif node.kind == "ROUNDED_RECT":
+                r = min(nw, nh) * 0.15
+                lines.append(f'  <rect x="{x}" y="{y}" width="{nw}" height="{nh}" rx="{r}" ry="{r}" {fill} {stroke}/>')
+            elif node.kind == "CLOUD":
+                # Approximate cloud with ellipse
+                cx, cy = x + nw / 2, y + nh / 2
+                rx, ry = nw / 2, nh / 2
+                lines.append(f'  <ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" {fill} {stroke}/>')
+            else:
+                lines.append(f'  <rect x="{x}" y="{y}" width="{nw}" height="{nh}" {fill} {stroke}/>')
+
+            # Text label
+            if getattr(node, "show_name", True) and node.name:
+                ha = getattr(node, "label_h_align", "left")
+                va = getattr(node, "label_v_align", "top")
+                anchor = {"left": "start", "center": "middle", "right": "end"}.get(ha, "start")
+                pad = 6
+                tx = x + pad if ha == "left" else (x + nw / 2 if ha == "center" else x + nw - pad)
+                ty = y + pad + node.label_font_size if va == "top" else (
+                    y + nh / 2 + node.label_font_size / 3 if va == "center" else y + nh - pad)
+                fw = ' font-weight="bold"' if node.label_font_weight == "bold" else ""
+                lines.append(f'  <text x="{tx}" y="{ty}" font-family="{_esc(node.label_font_family)}" '
+                             f'font-size="{node.label_font_size}" text-anchor="{anchor}"{fw}>'
+                             f'{_esc(node.name)}</text>')
+
+        # Connections
+        for conn in export_conns:
+            coords = self._connection_line_coords(conn)
+            if coords and len(coords) >= 4:
+                points = [(coords[i] - ox, coords[i + 1] - oy) for i in range(0, len(coords), 2)]
+                pts_str = " ".join(f"{px},{py}" for px, py in points)
+                lc = conn.line_color or "#333333"
+                lw = max(1, int(conn.line_thickness * 2))
+                lines.append(f'  <polyline points="{pts_str}" fill="none" '
+                             f'stroke="{_esc(lc)}" stroke-width="{lw}"/>')
+            if conn.label:
+                lx = (conn.label_x or 200) - ox
+                ly = (conn.label_y or 200) - oy
+                fw = ' font-weight="bold"' if conn.label_font_weight == "bold" else ""
+                lines.append(f'  <text x="{lx}" y="{ly}" font-family="{_esc(conn.label_font_family)}" '
+                             f'font-size="{conn.label_font_size}" text-anchor="middle"{fw}>'
+                             f'{_esc(conn.label)}</text>')
+
+        lines.append('</svg>')
+        path.write_text("\n".join(lines), encoding="utf-8")
+        if not silent:
+            messagebox.showinfo("Export", f"SVG saved to:\n{path}\n\nOpen in Visio: File → Open → select this SVG")
+
     def _save_pptx(self):
         from tkinter import filedialog
         path = filedialog.asksaveasfilename(
@@ -5200,8 +5392,12 @@ class DiagramApp:
         if path:
             self._export_pptx(Path(path))
 
-    def _export_pptx(self, path: Path):
-        """Export the current diagram to a PowerPoint (.pptx) file."""
+    def _export_pptx(self, path: Path, nodes_list=None, connections_list=None, silent=False):
+        """Export diagram to PowerPoint (.pptx).
+
+        If *nodes_list* / *connections_list* are given, export only those
+        elements; otherwise export everything.
+        """
         try:
             from pptx import Presentation
             from pptx.util import Pt, Emu
@@ -5227,15 +5423,45 @@ class DiagramApp:
                 return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
             return RGBColor(0, 0, 0)
 
-        # Determine slide dimensions from content bounding box
-        bbox = self._content_bbox()
-        if not bbox:
+        # Determine which nodes and connections to export
+        export_nodes = nodes_list if nodes_list is not None else list(self.nodes.values())
+        export_conns = connections_list if connections_list is not None else list(self.connections)
+
+        # Determine slide dimensions from exported elements
+        if not export_nodes and not export_conns:
+            if nodes_list is not None or connections_list is not None:
+                return  # nothing selected, silent
             messagebox.showinfo("Info", "Nothing to export.")
             return
+
+        # Calculate bounding box of exported elements
+        x1_bb, y1_bb = float("inf"), float("inf")
+        x2_bb, y2_bb = float("-inf"), float("-inf")
+        for node in export_nodes:
+            x1_bb = min(x1_bb, node.x)
+            y1_bb = min(y1_bb, node.y)
+            x2_bb = max(x2_bb, node.x + node.width)
+            y2_bb = max(y2_bb, node.y + node.height)
+        for conn in export_conns:
+            coords = self._connection_line_coords(conn)
+            if coords and len(coords) >= 4:
+                for i in range(0, len(coords), 2):
+                    x1_bb = min(x1_bb, coords[i])
+                    y1_bb = min(y1_bb, coords[i + 1])
+                    x2_bb = max(x2_bb, coords[i])
+                    y2_bb = max(y2_bb, coords[i + 1])
+            if conn.label_x is not None:
+                x1_bb = min(x1_bb, conn.label_x - 50)
+                y1_bb = min(y1_bb, conn.label_y - 10)
+                x2_bb = max(x2_bb, conn.label_x + 50)
+                y2_bb = max(y2_bb, conn.label_y + 10)
+        if x1_bb == float("inf"):
+            return
+
         margin = 40
-        ox, oy = bbox[0] - margin, bbox[1] - margin
-        slide_w = bbox[2] - bbox[0] + 2 * margin
-        slide_h = bbox[3] - bbox[1] + 2 * margin
+        ox, oy = x1_bb - margin, y1_bb - margin
+        slide_w = x2_bb - x1_bb + 2 * margin
+        slide_h = y2_bb - y1_bb + 2 * margin
 
         prs = Presentation()
         prs.slide_width = Emu(int(slide_w * 914400 / 96))  # px -> EMU at 96dpi
@@ -5257,14 +5483,14 @@ class DiagramApp:
 
         # Collect junction node names
         junction_names: set[str] = set()
-        for conn in self.connections:
+        for conn in export_conns:
             for jp in conn.junction_ports:
                 n = jp.get("node")
                 if n:
                     junction_names.add(n)
 
         # --- Draw nodes ---
-        sorted_nodes = sorted(self.nodes.values(), key=lambda n: n.level)
+        sorted_nodes = sorted(export_nodes, key=lambda n: n.level)
         for node in sorted_nodes:
             if node.name in junction_names:
                 continue
@@ -5400,7 +5626,7 @@ class DiagramApp:
                             bodyPr.set('anchor', 'b')
 
         # --- Draw connections (wires) as freeform lines ---
-        for connection in self.connections:
+        for connection in export_conns:
             coords = self._connection_line_coords(connection)
             if not coords or len(coords) < 4:
                 # Handle floating labels
@@ -5472,7 +5698,8 @@ class DiagramApp:
                 run.font.bold = connection.label_font_weight == "bold"
 
         prs.save(str(path))
-        messagebox.showinfo("Export", f"PPTX saved to:\n{path}")
+        if not silent:
+            messagebox.showinfo("Export", f"PPTX saved to:\n{path}")
 
     # ------------------------------------------------------------------
     #  Import from PPTX / VSDX
