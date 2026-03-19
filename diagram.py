@@ -157,6 +157,8 @@ class DiagramApp:
         self.save_png_button.pack(side=tk.LEFT, padx=2)
         self.save_pptx_button = ttk.Button(self.toolbar_row1, text="SAVE PPTX (Ctrl+Shift+P)", command=self._save_pptx, style="Tool.TButton")
         self.save_pptx_button.pack(side=tk.LEFT, padx=2)
+        self.import_button = ttk.Button(self.toolbar_row1, text="IMPORT (Ctrl+I)", command=self._import_file, style="Tool.TButton")
+        self.import_button.pack(side=tk.LEFT, padx=2)
         self.connect_button = ttk.Button(self.toolbar_row1, text="CONNECT (W)", command=self._toggle_connect_mode, style="Tool.TButton")
         self.connect_button.pack(side=tk.LEFT, padx=2)
         self.wire_name_button = ttk.Button(self.toolbar_row1, text="LABEL (L)", command=self._toggle_wire_name_mode, style="Tool.TButton")
@@ -345,6 +347,7 @@ class DiagramApp:
         self.root.bind("<Control-v>", lambda _event: self._paste_selection())
         self.root.bind("<Control-p>", lambda _event: self._save_png())
         self.root.bind("<Control-Shift-P>", lambda _event: self._save_pptx())
+        self.root.bind("<Control-i>", lambda _event: self._import_file())
         self.root.bind("<Tab>", lambda _event: self._toggle_wire_arrow())
         self.root.after(300, lambda: self.save_diagram(self.output_path))
         self._record_history(initial=True)
@@ -2899,6 +2902,9 @@ class DiagramApp:
 
     def _paste_selection(self):
         if not self._clipboard:
+            # Try pasting from Office clipboard (PPT/Visio)
+            if self._try_paste_office_clipboard():
+                return
             return
         cb = self._clipboard
         paste_offset = 30
@@ -5136,6 +5142,8 @@ class DiagramApp:
             "- DELETE (Del): toggle delete mode (items blink red, click to remove, Del to exit).\n"
             "- SAVE (Ctrl+S): save to input.json.\n"
             "- SAVE PPTX (Ctrl+Shift+P): export to PowerPoint (.pptx).\n"
+            "- IMPORT (Ctrl+I): import shapes from PowerPoint (.pptx) or Visio (.vsdx).\n"
+            "- Ctrl+V: paste from internal clipboard or Office (PPT/Visio) clipboard.\n"
             "- CONNECT (W): connect ports (click empty space to add a bend).\n"
             "- DISCONNECT: click a wire to remove it.\n"
             "- LABEL (L): click a wire to add/edit a label.\n"
@@ -5466,7 +5474,688 @@ class DiagramApp:
         prs.save(str(path))
         messagebox.showinfo("Export", f"PPTX saved to:\n{path}")
 
-    def _toggle_wire_arrow(self):
+    # ------------------------------------------------------------------
+    #  Import from PPTX / VSDX
+    # ------------------------------------------------------------------
+
+    def _import_file(self):
+        """Open file dialog to import PPTX or VSDX."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("PowerPoint / Visio", "*.pptx *.vsdx"),
+                ("PowerPoint files", "*.pptx"),
+                ("Visio files", "*.vsdx"),
+                ("All files", "*.*"),
+            ],
+            title="Import from PowerPoint / Visio",
+        )
+        if not path:
+            return
+        p = Path(path)
+        if p.suffix.lower() == ".pptx":
+            self._import_pptx_file(p)
+        elif p.suffix.lower() == ".vsdx":
+            self._import_vsdx_file(p)
+        else:
+            messagebox.showerror("Error", f"Unsupported file type: {p.suffix}")
+
+    def _import_pptx_file(self, path: Path):
+        """Import shapes, connectors, and text from a .pptx file."""
+        try:
+            from pptx import Presentation
+        except ImportError:
+            messagebox.showerror("Error", "python-pptx not installed.\nRun: pip install python-pptx")
+            return
+        try:
+            prs = Presentation(str(path))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open PPTX:\n{e}")
+            return
+        self._import_pptx_presentation(prs)
+
+    def _import_pptx_data(self, data: bytes):
+        """Import shapes from raw PPTX bytes (clipboard)."""
+        import io
+        try:
+            from pptx import Presentation
+        except ImportError:
+            return False
+        try:
+            prs = Presentation(io.BytesIO(data))
+        except Exception:
+            return False
+        self._import_pptx_presentation(prs)
+        return True
+
+    def _import_pptx_presentation(self, prs):
+        """Core import logic: parse a Presentation object into diagram nodes & connections."""
+        from pptx.util import Emu
+        from pptx.enum.shapes import MSO_SHAPE_TYPE, MSO_SHAPE
+        from pptx.dml.color import RGBColor
+
+        emu2px = 96.0 / 914400.0
+
+        # Reverse shape mapping: pptx auto_shape_type int -> diagram kind
+        _SHAPE_MAP = {
+            int(MSO_SHAPE.OVAL): "CIRCLE",
+            int(MSO_SHAPE.RECTANGLE): "RECTANGLE",
+            int(MSO_SHAPE.ROUNDED_RECTANGLE): "ROUNDED_RECT",
+            int(MSO_SHAPE.CLOUD): "CLOUD",
+        }
+
+        def _read_rgb(color_format) -> str:
+            """Try to read an RGBColor from a fill/line color, return hex."""
+            try:
+                rgb = color_format.rgb
+                return f"#{rgb}"
+            except Exception:
+                return ""
+
+        def _read_fill(shape) -> str:
+            """Extract fill color hex from shape. Empty string = no fill."""
+            try:
+                ft = shape.fill.type
+                if ft is None:
+                    return ""
+                from pptx.enum.dml import MSO_THEME_COLOR
+                # SOLID fill
+                if ft == 1:  # MSO_FILL_TYPE.SOLID
+                    return _read_rgb(shape.fill.fore_color)
+                # BACKGROUND (no fill)
+                if ft == 5:  # MSO_FILL_TYPE.BACKGROUND
+                    return ""
+            except Exception:
+                pass
+            return "#e0e0e0"  # default
+
+        def _read_line(shape) -> tuple:
+            """Return (outline_color, outline_width, outline_style, outline_enabled)."""
+            oc = ""
+            ow = 1.0
+            os_ = "solid"
+            enabled = True
+            try:
+                ln = shape.line
+                if ln.fill.type is not None and ln.fill.type != 5:
+                    oc = _read_rgb(ln.color)
+                else:
+                    enabled = False
+                if ln.width:
+                    ow = max(0.5, ln.width / 914400.0 * 96.0 / 2.0)
+                    # Clamp to our thickness levels
+                    if ow < 0.75:
+                        ow = 0.5
+                    elif ow < 1.5:
+                        ow = 1.0
+                    else:
+                        ow = 2.0
+                try:
+                    from pptx.oxml.ns import qn
+                    ln_elem = ln._ln
+                    if ln_elem is not None:
+                        prstDash = ln_elem.find(qn('a:prstDash'))
+                        if prstDash is not None:
+                            dv = prstDash.get('val', 'solid')
+                            if dv in ('dash', 'lgDash', 'sysDash', 'dashDot', 'lgDashDot'):
+                                os_ = "dashed"
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if not oc:
+                oc = "#BBBBBB"
+            return oc, ow, os_, enabled
+
+        def _read_text(shape) -> tuple:
+            """Return (text, font_size, font_family, font_weight, h_align, v_align)."""
+            text = ""
+            fs = 12
+            ff = "Arial"
+            fw = "bold"
+            ha = "center"
+            va = "center"
+            try:
+                if shape.has_text_frame:
+                    tf = shape.text_frame
+                    text = tf.text.strip()
+                    if tf.paragraphs:
+                        p = tf.paragraphs[0]
+                        if p.runs:
+                            run = p.runs[0]
+                            if run.font.size:
+                                fs = int(run.font.size / 12700)  # EMU -> pt
+                            if run.font.name:
+                                ff = run.font.name
+                            if run.font.bold:
+                                fw = "bold"
+                            else:
+                                fw = "normal"
+                        # Alignment
+                        from pptx.enum.text import PP_ALIGN
+                        if p.alignment == PP_ALIGN.CENTER:
+                            ha = "center"
+                        elif p.alignment == PP_ALIGN.RIGHT:
+                            ha = "right"
+                        else:
+                            ha = "left"
+                    # Vertical alignment
+                    try:
+                        from pptx.oxml.ns import qn
+                        body = shape._element.find(qn('p:txBody'))
+                        if body is not None:
+                            bodyPr = body.find(qn('a:bodyPr'))
+                            if bodyPr is not None:
+                                anc = bodyPr.get('anchor', 't')
+                                if anc == 'ctr':
+                                    va = "center"
+                                elif anc == 'b':
+                                    va = "bottom"
+                                else:
+                                    va = "top"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return text, fs, ff, fw, ha, va
+
+        # Find bounding box of all shapes to calculate offset
+        all_lefts = []
+        all_tops = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                all_lefts.append(shape.left * emu2px)
+                all_tops.append(shape.top * emu2px)
+        if not all_lefts:
+            return
+        # Place imported content starting at a reasonable position
+        min_x = min(all_lefts)
+        min_y = min(all_tops)
+        # Offset so content starts near next available position
+        base_x, base_y = self._next_block_position()
+        off_x = base_x - min_x
+        off_y = base_y - min_y
+
+        imported_count = {"shapes": 0, "lines": 0, "texts": 0}
+
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                left = int(shape.left * emu2px + off_x)
+                top = int(shape.top * emu2px + off_y)
+                width = max(20, int(shape.width * emu2px))
+                height = max(20, int(shape.height * emu2px))
+                rotation = int(shape.rotation or 0) % 360
+
+                shape_type_val = int(shape.shape_type) if shape.shape_type else 0
+
+                # --- CONNECTOR / LINE ---
+                if shape_type_val == int(MSO_SHAPE_TYPE.LINE):
+                    try:
+                        x1 = int(shape.begin_x * emu2px + off_x)
+                        y1 = int(shape.begin_y * emu2px + off_y)
+                        x2 = int(shape.end_x * emu2px + off_x)
+                        y2 = int(shape.end_y * emu2px + off_y)
+                    except Exception:
+                        x1, y1 = left, top
+                        x2, y2 = left + width, top + height
+                    line_color = "#333333"
+                    line_w = 1.0
+                    try:
+                        lc = _read_rgb(shape.line.color)
+                        if lc:
+                            line_color = lc
+                        if shape.line.width:
+                            line_w = max(0.5, shape.line.width / 914400.0 * 96.0 / 2.0)
+                    except Exception:
+                        pass
+                    conn = Connection(src=None, dst=None)
+                    conn.free_points = [(x1, y1), (x2, y2)]
+                    conn.line_color = line_color
+                    conn.line_thickness = min(2.0, line_w)
+                    conn.show_arrow = False
+                    # Check text on connector
+                    text, *_ = _read_text(shape)
+                    if text:
+                        conn.label = text
+                        conn.label_x = (x1 + x2) / 2
+                        conn.label_y = (y1 + y2) / 2
+                    self.connections.append(conn)
+                    self._draw_connection(conn)
+                    imported_count["lines"] += 1
+                    continue
+
+                # --- FREEFORM (polyline / custom path) ---
+                if shape_type_val == int(MSO_SHAPE_TYPE.FREEFORM):
+                    # Try to extract vertices from the freeform XML
+                    points = self._extract_freeform_points(shape, emu2px, off_x, off_y)
+                    if points and len(points) >= 2:
+                        line_color = "#333333"
+                        line_w = 1.0
+                        try:
+                            lc = _read_rgb(shape.line.color)
+                            if lc:
+                                line_color = lc
+                            if shape.line.width:
+                                line_w = max(0.5, shape.line.width / 914400.0 * 96.0 / 2.0)
+                        except Exception:
+                            pass
+                        # Check if freeform has fill -> treat as shape, else as wire
+                        has_fill = False
+                        try:
+                            ft = shape.fill.type
+                            if ft is not None and ft != 5:
+                                has_fill = True
+                        except Exception:
+                            pass
+                        if not has_fill:
+                            conn = Connection(src=None, dst=None)
+                            conn.free_points = points
+                            conn.line_color = line_color
+                            conn.line_thickness = min(2.0, line_w)
+                            conn.show_arrow = False
+                            self.connections.append(conn)
+                            self._draw_connection(conn)
+                            imported_count["lines"] += 1
+                            continue
+                    # Freeform with fill: treat as a rectangle shape
+                    kind = "RECTANGLE"
+                    fill_color = _read_fill(shape)
+                    oc, ow, os_, oe = _read_line(shape)
+                    text, fs, ff, fw, ha, va = _read_text(shape)
+                    name = text if text else self._unique_node_name(kind)
+                    if name in self.nodes:
+                        name = self._unique_node_name(name)
+                    node = Node(
+                        name=name, kind=kind, inputs=[], outputs=[],
+                        x=left, y=top, width=width, height=height, base_height=height,
+                        fill_color=fill_color, outline_color=oc, outline_enabled=oe,
+                        outline_style=os_, outline_scale=ow,
+                        label_font_size=fs, label_font_family=ff, label_font_weight=fw,
+                        label_h_align=ha, label_v_align=va,
+                        show_name=bool(text), level=self._next_level(), rotation=rotation,
+                    )
+                    self.nodes[name] = node
+                    self._draw_node(node)
+                    imported_count["shapes"] += 1
+                    continue
+
+                # --- TEXT BOX ---
+                if shape_type_val == int(MSO_SHAPE_TYPE.TEXT_BOX):
+                    text, fs, ff, fw, ha, va = _read_text(shape)
+                    if text:
+                        # Create as a floating label (Connection with only label)
+                        conn = Connection(src=None, dst=None)
+                        conn.label = text
+                        conn.label_font_size = fs
+                        conn.label_font_family = ff
+                        conn.label_font_weight = fw
+                        conn.label_x = left + width / 2
+                        conn.label_y = top + height / 2
+                        self.connections.append(conn)
+                        self._draw_connection(conn)
+                        imported_count["texts"] += 1
+                    continue
+
+                # --- GROUP: recurse into sub-shapes ---
+                if shape_type_val == int(MSO_SHAPE_TYPE.GROUP):
+                    # Groups have a shapes property
+                    # We'll skip group handling for simplicity and let outer loop handle items
+                    continue
+
+                # --- AUTO_SHAPE / other shapes ---
+                kind = "BLOCK"
+                if shape_type_val == int(MSO_SHAPE_TYPE.AUTO_SHAPE):
+                    try:
+                        ast = int(shape.auto_shape_type)
+                        kind = _SHAPE_MAP.get(ast, "BLOCK")
+                    except Exception:
+                        kind = "BLOCK"
+
+                fill_color = _read_fill(shape)
+                oc, ow, os_, oe = _read_line(shape)
+                text, fs, ff, fw, ha, va = _read_text(shape)
+                name = text if text else self._unique_node_name(kind)
+                if name in self.nodes:
+                    name = self._unique_node_name(name)
+
+                # Diagram shapes get default ports
+                if kind in self._DIAGRAM_SHAPES:
+                    inputs = [
+                        Port(name="left", kind="in", side="left", offset=0.5),
+                        Port(name="top", kind="in", side="top", offset=0.5),
+                    ]
+                    outputs = [
+                        Port(name="right", kind="out", side="right", offset=0.5),
+                        Port(name="bottom", kind="out", side="bottom", offset=0.5),
+                    ]
+                else:
+                    inputs = []
+                    outputs = []
+
+                node = Node(
+                    name=name, kind=kind, inputs=inputs, outputs=outputs,
+                    x=left, y=top, width=width, height=height, base_height=height,
+                    fill_color=fill_color, outline_color=oc, outline_enabled=oe,
+                    outline_style=os_, outline_scale=ow,
+                    label_font_size=fs, label_font_family=ff, label_font_weight=fw,
+                    label_h_align=ha, label_v_align=va,
+                    show_name=bool(text), level=self._next_level(), rotation=rotation,
+                )
+                self.nodes[name] = node
+                self._draw_node(node)
+                imported_count["shapes"] += 1
+
+        self._apply_z_order()
+        self._record_history()
+        total = sum(imported_count.values())
+        messagebox.showinfo(
+            "Import",
+            f"Imported {total} elements:\n"
+            f"  Shapes: {imported_count['shapes']}\n"
+            f"  Lines/Wires: {imported_count['lines']}\n"
+            f"  Texts: {imported_count['texts']}",
+        )
+
+    def _extract_freeform_points(self, shape, emu2px, off_x, off_y):
+        """Extract vertex points from a freeform shape's XML."""
+        try:
+            from pptx.oxml.ns import qn
+            # Get shape position for offset
+            sx = shape.left * emu2px + off_x
+            sy = shape.top * emu2px + off_y
+            sw = shape.width * emu2px
+            sh = shape.height * emu2px
+
+            sp_elem = shape._element
+            # Find the path element in custGeom
+            custGeom = sp_elem.find('.//' + qn('a:custGeom'))
+            if custGeom is None:
+                return None
+            pathLst = custGeom.find(qn('a:pathLst'))
+            if pathLst is None:
+                return None
+            path_elem = pathLst.find(qn('a:path'))
+            if path_elem is None:
+                return None
+
+            path_w = int(path_elem.get('w', '1')) or 1
+            path_h = int(path_elem.get('h', '1')) or 1
+
+            points = []
+            for child in path_elem:
+                tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if tag in ('moveTo', 'lnTo'):
+                    pt = child.find(qn('a:pt'))
+                    if pt is not None:
+                        x_val = int(pt.get('x', '0'))
+                        y_val = int(pt.get('y', '0'))
+                        px = sx + (x_val / path_w) * sw
+                        py = sy + (y_val / path_h) * sh
+                        points.append((int(px), int(py)))
+            return points if len(points) >= 2 else None
+        except Exception:
+            return None
+
+    def _import_vsdx_file(self, path: Path):
+        """Import shapes and connectors from a Visio .vsdx file."""
+        import zipfile
+        try:
+            zf = zipfile.ZipFile(str(path), 'r')
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open VSDX:\n{e}")
+            return
+
+        try:
+            from lxml import etree
+        except ImportError:
+            messagebox.showerror("Error", "lxml not installed.\nRun: pip install lxml")
+            zf.close()
+            return
+
+        ns = {
+            'v': 'http://schemas.microsoft.com/office/visio/2012/main',
+        }
+
+        # Find page files
+        page_files = [n for n in zf.namelist()
+                      if n.startswith('visio/pages/page') and n.endswith('.xml')]
+        if not page_files:
+            messagebox.showinfo("Import", "No pages found in VSDX file.")
+            zf.close()
+            return
+
+        # Visio uses inches; convert to pixels at 96 DPI
+        in2px = 96.0
+
+        imported_count = {"shapes": 0, "lines": 0, "texts": 0}
+
+        for page_file in page_files:
+            try:
+                page_xml = zf.read(page_file)
+                root = etree.fromstring(page_xml)
+            except Exception:
+                continue
+
+            # Get page height for Y-axis inversion (Visio origin is bottom-left)
+            page_h_in = 11.0  # default letter size
+            page_props = root.find('.//v:PageSheet', ns)
+            if page_props is not None:
+                ph_cell = page_props.find('.//v:Cell[@N="PageHeight"]', ns)
+                if ph_cell is not None:
+                    try:
+                        page_h_in = float(ph_cell.get('V', '11'))
+                    except ValueError:
+                        pass
+
+            shapes = root.findall('.//v:Shape', ns)
+
+            # Collect all shape data first for bounding-box calculation
+            shape_data = []
+            for s in shapes:
+                cells = {}
+                for cell in s.findall('v:Cell', ns):
+                    n = cell.get('N')
+                    v = cell.get('V')
+                    if n and v:
+                        cells[n] = v
+
+                # Position: PinX/PinY is center, Width/Height is size
+                try:
+                    pin_x = float(cells.get('PinX', '0'))
+                    pin_y = float(cells.get('PinY', '0'))
+                    w = float(cells.get('Width', '1'))
+                    h = float(cells.get('Height', '0.5'))
+                except ValueError:
+                    continue
+
+                # Convert to top-left in pixels (invert Y)
+                cx_px = pin_x * in2px
+                cy_px = (page_h_in - pin_y) * in2px
+                w_px = max(20, int(w * in2px))
+                h_px = max(20, int(h * in2px))
+                x_px = int(cx_px - w_px / 2)
+                y_px = int(cy_px - h_px / 2)
+
+                # Text
+                text_elem = s.find('v:Text', ns)
+                text = ""
+                if text_elem is not None and text_elem.text:
+                    text = text_elem.text.strip()
+
+                # Check if it's a connector (has BeginX/BeginY)
+                is_connector = 'BeginX' in cells and 'EndX' in cells
+
+                # Rotation (in radians in Visio)
+                angle_rad = float(cells.get('Angle', '0'))
+                import math
+                rotation = int(math.degrees(angle_rad)) % 360
+
+                # Fill color
+                fill_color = cells.get('FillForegnd', '#e0e0e0')
+                if fill_color.startswith('#'):
+                    pass
+                else:
+                    fill_color = '#e0e0e0'
+                if cells.get('FillPattern', '1') == '0':
+                    fill_color = ''  # no fill
+
+                # Line
+                line_color = cells.get('LineColor', '#000000')
+                if not line_color.startswith('#'):
+                    line_color = '#BBBBBB'
+                line_pattern = cells.get('LinePattern', '1')
+                outline_style = 'dashed' if line_pattern in ('2', '3', '4') else 'solid'
+                line_weight = float(cells.get('LineWeight', '0.01'))
+                outline_scale = 1.0
+                if line_weight > 0.02:
+                    outline_scale = 2.0
+                elif line_weight < 0.005:
+                    outline_scale = 0.5
+
+                shape_data.append({
+                    'x': x_px, 'y': y_px, 'w': w_px, 'h': h_px,
+                    'text': text, 'rotation': rotation,
+                    'fill_color': fill_color, 'line_color': line_color,
+                    'outline_style': outline_style, 'outline_scale': outline_scale,
+                    'is_connector': is_connector,
+                    'cells': cells,
+                })
+
+            if not shape_data:
+                continue
+
+            # Calculate offset
+            min_x = min(sd['x'] for sd in shape_data)
+            min_y = min(sd['y'] for sd in shape_data)
+            base_x, base_y = self._next_block_position()
+            off_x = base_x - min_x
+            off_y = base_y - min_y
+
+            for sd in shape_data:
+                x = sd['x'] + off_x
+                y = sd['y'] + off_y
+                w, h = sd['w'], sd['h']
+
+                if sd['is_connector']:
+                    cells = sd['cells']
+                    try:
+                        x1 = int(float(cells['BeginX']) * in2px + off_x +
+                                 (base_x - min_x - off_x))
+                        y1 = int((page_h_in - float(cells['BeginY'])) * in2px + off_y +
+                                 (base_y - min_y - off_y))
+                        x2 = int(float(cells['EndX']) * in2px + off_x +
+                                 (base_x - min_x - off_x))
+                        y2 = int((page_h_in - float(cells['EndY'])) * in2px + off_y +
+                                 (base_y - min_y - off_y))
+                    except Exception:
+                        x1, y1 = x, y
+                        x2, y2 = x + w, y + h
+                    conn = Connection(src=None, dst=None)
+                    conn.free_points = [(x1, y1), (x2, y2)]
+                    conn.line_color = sd['line_color']
+                    conn.line_thickness = sd['outline_scale']
+                    conn.show_arrow = False
+                    if sd['text']:
+                        conn.label = sd['text']
+                        conn.label_x = (x1 + x2) / 2
+                        conn.label_y = (y1 + y2) / 2
+                    self.connections.append(conn)
+                    self._draw_connection(conn)
+                    imported_count["lines"] += 1
+                    continue
+
+                # If shape has only text and is small, treat as text label
+                if sd['text'] and w < 40 and h < 30:
+                    conn = Connection(src=None, dst=None)
+                    conn.label = sd['text']
+                    conn.label_x = x + w / 2
+                    conn.label_y = y + h / 2
+                    self.connections.append(conn)
+                    self._draw_connection(conn)
+                    imported_count["texts"] += 1
+                    continue
+
+                kind = "BLOCK"
+                name = sd['text'] if sd['text'] else self._unique_node_name(kind)
+                if name in self.nodes:
+                    name = self._unique_node_name(name)
+
+                node = Node(
+                    name=name, kind=kind, inputs=[], outputs=[],
+                    x=x, y=y, width=w, height=h, base_height=h,
+                    fill_color=sd['fill_color'], outline_color=sd['line_color'],
+                    outline_enabled=True, outline_style=sd['outline_style'],
+                    outline_scale=sd['outline_scale'],
+                    label_font_size=12, label_font_family="Arial",
+                    label_font_weight="bold",
+                    label_h_align="center", label_v_align="center",
+                    show_name=bool(sd['text']), level=self._next_level(),
+                    rotation=sd['rotation'],
+                )
+                self.nodes[name] = node
+                self._draw_node(node)
+                imported_count["shapes"] += 1
+
+        zf.close()
+        self._apply_z_order()
+        self._record_history()
+        total = sum(imported_count.values())
+        messagebox.showinfo(
+            "Import",
+            f"Imported {total} elements:\n"
+            f"  Shapes: {imported_count['shapes']}\n"
+            f"  Lines/Wires: {imported_count['lines']}\n"
+            f"  Texts: {imported_count['texts']}",
+        )
+
+    def _try_paste_office_clipboard(self) -> bool:
+        """Try to paste from Office clipboard (Windows: PowerPoint Slides Package)."""
+        # Method 1: Windows - read "PowerPoint 14.0 Slides Package" from clipboard
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            # Register PPT clipboard format
+            pptx_fmt = user32.RegisterClipboardFormatW("PowerPoint 14.0 Slides Package")
+            if not user32.OpenClipboard(0):
+                return False
+            try:
+                if user32.IsClipboardFormatAvailable(pptx_fmt):
+                    handle = user32.GetClipboardData(pptx_fmt)
+                    if handle:
+                        size = kernel32.GlobalSize(handle)
+                        ptr = kernel32.GlobalLock(handle)
+                        if ptr and size > 0:
+                            data = ctypes.string_at(ptr, size)
+                            kernel32.GlobalUnlock(handle)
+                            user32.CloseClipboard()
+                            return self._import_pptx_data(data)
+            finally:
+                try:
+                    user32.CloseClipboard()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Method 2: Try reading clipboard as file path to a temp pptx/vsdx
+        try:
+            clip_text = self.root.clipboard_get()
+            if clip_text:
+                p = Path(clip_text.strip().strip('"'))
+                if p.exists():
+                    if p.suffix.lower() == '.pptx':
+                        self._import_pptx_file(p)
+                        return True
+                    elif p.suffix.lower() == '.vsdx':
+                        self._import_vsdx_file(p)
+                        return True
+        except Exception:
+            pass
+
+        return False
         if not self._selected_wire:
             return
         connection = self._selected_wire
